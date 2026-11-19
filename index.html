@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Capycraft</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="scene.js" defer></script>
+</head>
+<body>
+  <main>
+    <div id="scene" class="scene" role="img" aria-label="Pixelová krajina Capycraftu se zasněženými horami, lesem a jezerem">
+      <div id="sky-base" class="layer sky-base"></div>
+      <div id="sky-glow" class="layer sky-glow">
+        <div class="sunset-gradient"></div>
+        <div class="sun-soft-glow"></div>
+        <div class="sun-halo"></div>
+        <div class="sun-flare"></div>
+      </div>
+      <div id="celestial" class="layer celestial">
+        <div class="sun"></div>
+        <div class="moon"></div>
+      </div>
+      <img id="stars" class="layer stars" src="assets/stars-voxel.png" alt="">
+      <div id="clouds" class="layer clouds">
+        <div class="cloud cloud-wide" style="--x: 71%; --y: 4%; --width: 25%"></div>
+        <div class="cloud cloud-wide" style="--x: 3%; --y: 26%; --width: 25%; --flip: -1"></div>
+        <div class="cloud cloud-mid" style="--x: 72%; --y: 25%; --width: 23%"></div>
+        <div class="cloud cloud-mid" style="--x: 10%; --y: 40%; --width: 21%; --flip: -1"></div>
+        <div class="cloud cloud-mid" style="--x: 83%; --y: 38%; --width: 15%"></div>
+        <div class="cloud cloud-far" style="--x: 33%; --y: 43%; --width: 16%; --flip: -1"></div>
+        <div class="cloud cloud-far" style="--x: 49%; --y: 44%; --width: 9%"></div>
+        <div class="cloud cloud-far" style="--x: 75%; --y: 46%; --width: 11%"></div>
+        <div class="cloud cloud-far" style="--x: 36%; --y: 50%; --width: 8%; --flip: -1"></div>
+        <div class="cloud cloud-far" style="--x: 58%; --y: 49%; --width: 6%"></div>
+      </div>
+      <img id="landscape" class="layer landscape" src="assets/landscape-shore.png" alt="">
+      <img id="forest" class="layer forest" src="assets/forest-distant.png" alt="">
+      <div class="sunset-wash"></div>
+      <div id="water" class="layer water">
+        <img src="assets/water-ripples.png" alt="">
+        <div class="water-light water-light-sun">
+          <div class="water-reflection"></div>
+          <div class="water-waves"><img src="assets/water-ripples.png" alt=""></div>
+        </div>
+        <div class="water-light water-light-moon">
+          <div class="water-reflection"></div>
+          <div class="water-waves"><img src="assets/water-ripples.png" alt=""></div>
+        </div>
+      </div>
+      <img class="water-landscape-reflection" src="assets/landscape-shore.png" alt="">
+      <img id="right-island" class="layer right-island" src="assets/right-island.png" alt="">
+      <div id="right-foreground" class="layer right-foreground">
+        <div class="floe-reflections" style="--floe-top: 653">
+          <div class="floe-reflection" style="--start-x: 798; --start-y: 706; --end-x: 855; --end-y: 713"></div>
+          <div class="floe-reflection" style="--start-x: 855; --start-y: 713; --end-x: 864; --end-y: 717"></div>
+          <div class="floe-reflection" style="--start-x: 864; --start-y: 717; --end-x: 896; --end-y: 721"></div>
+          <div class="floe-reflection" style="--start-x: 896; --start-y: 721; --end-x: 973; --end-y: 707"></div>
+        </div>
+        <div class="floe-reflections" style="--floe-top: 744">
+          <div class="floe-reflection" style="--start-x: 476; --start-y: 826; --end-x: 566; --end-y: 843"></div>
+          <div class="floe-reflection" style="--start-x: 566; --start-y: 843; --end-x: 660; --end-y: 827"></div>
+          <div class="floe-reflection" style="--start-x: 660; --start-y: 827; --end-x: 666; --end-y: 821"></div>
+          <div class="floe-reflection" style="--start-x: 666; --start-y: 821; --end-x: 687; --end-y: 823"></div>
+          <div class="floe-reflection" style="--start-x: 687; --start-y: 823; --end-x: 754; --end-y: 807"></div>
+        </div>
+        <img class="foreground-bank" src="assets/right-foreground-bank.png" alt="">
+        <img class="foreground-floes" src="assets/right-foreground-waterline.png" alt="">
+      </div>
+      <div class="sun-flare-ghost"></div>
+    </div>
+
+    <div class="controls">
+      <div class="time-control">
+        <label for="time">Denní doba</label>
+        <input id="time" type="range" min="0" max="1440" step="1" value="1050">
+        <output id="time-display" for="time">17:30</output>
+      </div>
+
+      <div class="scene-options">
+        <fieldset class="layer-controls">
+          <legend>Vrstvy</legend>
+          <div class="layer-options">
+            <label><input type="checkbox" value="sky-base" aria-controls="sky-base" checked> Obloha</label>
+            <label><input type="checkbox" value="sky-glow" aria-controls="sky-glow" checked> Záře</label>
+            <label><input type="checkbox" value="celestial" aria-controls="celestial" checked> Slunce a měsíc</label>
+            <label><input type="checkbox" value="stars" aria-controls="stars" checked> Hvězdy</label>
+            <label><input type="checkbox" value="clouds" aria-controls="clouds" checked> Mraky</label>
+            <label><input type="checkbox" value="landscape" aria-controls="landscape" checked> Hory</label>
+            <label><input type="checkbox" value="forest" aria-controls="forest" checked> Vzdálený les</label>
+            <label><input type="checkbox" value="water" aria-controls="water" checked> Voda</label>
+            <label><input type="checkbox" value="right-island" aria-controls="right-island" checked> Pravý ostrůvek</label>
+            <label><input type="checkbox" value="right-foreground" aria-controls="right-foreground" checked> Pravé popředí</label>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Denní záře</legend>
+          <div class="day-glow-options">
+            <label><input id="day-glow-soft" type="radio" name="day-glow" value="soft" aria-controls="sky-glow" checked> Jemná</label>
+            <label><input id="day-glow-halo" type="radio" name="day-glow" value="halo" aria-controls="sky-glow"> Halo</label>
+            <label><input id="day-glow-flare" type="radio" name="day-glow" value="flare" aria-controls="sky-glow"> Odlesk objektivu</label>
+          </div>
+        </fieldset>
+      </div>
+    </div>
+  </main>
+</body>
+</html>

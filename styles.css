@@ -1,0 +1,627 @@
+:root {
+  color-scheme: dark;
+  font-family: system-ui, sans-serif;
+  color: #d9e0ed;
+  background: #101521;
+  accent-color: #f0bc91;
+}
+
+body {
+  margin: 0;
+  min-height: 100svh;
+  display: grid;
+  place-items: center;
+}
+
+main {
+  width: 100%;
+  display: grid;
+  justify-items: center;
+}
+
+.scene {
+  --waterline: 65%;
+  --sun-flare-center-y: calc((100% + var(--waterline)) / 2);
+  --sunlight: color-mix(in srgb, #fff0b8, #ffad55 calc(100% * var(--twilight)));
+  --sun-disc: color-mix(in srgb, #fffdf3, var(--sunlight) calc(12% * var(--twilight)));
+  --sunset-light: calc(var(--twilight) * var(--glow-opacity));
+  --sunset-gradient: radial-gradient(
+    ellipse 134% 78% at var(--sun-x) calc(var(--waterline) + 19%),
+    #ffc276 25%,
+    #ffa482 38%,
+    #f382c4 47%,
+    #b86ce5 57%,
+    #7659ecc0 69%,
+    #4b48d96e 82%,
+    transparent 100%
+  );
+  position: relative;
+  width: 100%;
+  max-width: max(20rem, calc((100svh - 8.25rem) * 16 / 9));
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.layer,
+.cloud,
+.celestial > div {
+  position: absolute;
+}
+
+.sky-base {
+  z-index: 1;
+  inset: 0;
+  background-color: color-mix(
+    in srgb,
+    color-mix(in srgb, #0b142b, #2358fc calc(100% * var(--sky-light))),
+    #3477d8 calc(100% * var(--daylight))
+  );
+}
+
+.sky-glow {
+  z-index: 2;
+  inset: 0;
+}
+
+.sunset-gradient {
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  background: var(--sunset-gradient);
+  mask-image: linear-gradient(to bottom, #000 var(--waterline), transparent 73%);
+  opacity: var(--sunset-light);
+}
+
+.sky-glow::before,
+.sky-glow::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+
+.sky-glow::before {
+  --glow-color: color-mix(in srgb, var(--sunlight), #ffe891 46%);
+  background: radial-gradient(
+    ellipse calc(20% - 9% * var(--twilight)) calc(25% - 12% * var(--twilight))
+      at var(--sun-x) var(--sun-y),
+    var(--sun-disc) 16%,
+    var(--glow-color) 37%,
+    color-mix(in srgb, var(--glow-color) 60%, transparent) 60%,
+    color-mix(in srgb, var(--sunlight) 21%, transparent) 81%,
+    transparent 100%
+  );
+  opacity: var(--glow-opacity);
+}
+
+.sky-glow::after {
+  background: radial-gradient(
+    ellipse 18% 32% at var(--moon-x) var(--moon-y),
+    #c4dbffb0,
+    #9ab9ee7a 28%,
+    #6485d52e 56%,
+    transparent 100%
+  );
+  opacity: calc(0.56 * var(--moon-opacity));
+}
+
+.sunset-wash {
+  position: absolute;
+  z-index: 8;
+  inset: 0;
+  background: var(--sunset-gradient);
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 42%,
+    #000 52% 59%,
+    transparent var(--waterline)
+  );
+  opacity: calc(0.25 * var(--sunset-light));
+}
+
+.sky-glow[hidden] ~ .sunset-wash {
+  display: none;
+}
+
+.sun-soft-glow,
+.sun-halo {
+  display: none;
+  position: absolute;
+  inset: 0;
+}
+
+.sun-soft-glow {
+  background: radial-gradient(
+    ellipse 10.5% 18.67% at var(--sun-x) var(--sun-y),
+    #d5ffffa6,
+    #b5f2ff86 24%,
+    #94dfff4f 48%,
+    #86d9ff20 70%,
+    transparent 100%
+  );
+  opacity: calc(0.72 * var(--daylight));
+}
+
+.sun-halo {
+  background: radial-gradient(
+    ellipse 11.4% 20.27% at var(--sun-x) var(--sun-y),
+    #fff8d168,
+    #fff6d22a 28%,
+    #fff8d10b 38%,
+    #ffdfa55c 53%,
+    #fff2cc8d 59%,
+    #e2f4ff53 65%,
+    transparent 78%
+  );
+  opacity: calc(0.68 * var(--daylight));
+}
+
+main:has(#day-glow-soft:checked) .sky-glow::before {
+  opacity: calc(var(--glow-opacity) * (1 - var(--daylight)));
+}
+
+main:has(#day-glow-soft:checked) .sun-soft-glow,
+main:has(#day-glow-halo:checked) .sun-halo,
+main:has(#day-glow-flare:checked) .sun-flare,
+main:has(#day-glow-flare:checked) .sky-glow:not([hidden]) ~ .sun-flare-ghost {
+  display: block;
+}
+
+.sun-flare {
+  display: none;
+  position: absolute;
+  left: var(--sun-x);
+  top: var(--sun-y);
+  width: 27%;
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%) rotate(var(--sun-flare-angle));
+  background: radial-gradient(
+    ellipse 32% 25% at 50% 50%,
+    #fff5cda6,
+    #fff4c564 35%,
+    #ffefc92b 65%,
+    transparent 100%
+  );
+  opacity: calc(0.80 * var(--daylight));
+}
+
+.sun-flare-ghost {
+  display: none;
+  position: absolute;
+  z-index: 12;
+  left: 50%;
+  top: var(--sun-flare-center-y);
+  width: 18%;
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%) rotate(var(--sun-flare-angle));
+  background: radial-gradient(
+    ellipse 30% 36% at 50% 50%,
+    #fff3cf34,
+    #ffedbf22 49%,
+    #fff3ce70 68%,
+    #c8e5f63d 83%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(to right, #0004 18%, #000 65%, #0008 88%);
+  mix-blend-mode: screen;
+  opacity: calc(0.64 * var(--daylight));
+}
+
+.celestial {
+  z-index: 3;
+  inset: 0;
+}
+
+.celestial > div {
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%);
+}
+
+.sun {
+  left: var(--sun-x);
+  top: var(--sun-y);
+  width: 4.8%;
+  background-color: var(--sun-disc);
+  opacity: var(--sun-opacity);
+}
+
+.moon {
+  left: var(--moon-x);
+  top: var(--moon-y);
+  width: 4.4%;
+  background-color: #e1ecff;
+  opacity: var(--moon-opacity);
+}
+
+.stars {
+  z-index: 4;
+  inset: 0 auto auto 0;
+  width: 100%;
+  opacity: var(--stars-opacity);
+  mask-image:
+    linear-gradient(24deg, #0004, #000a 29%, #000 44% 49%, #0004 70%),
+    linear-gradient(150deg, #0004, #000a 39%, #000 52% 57%, #0004 77%);
+}
+
+.clouds {
+  --sheet-width: 1672;
+  --sheet-height: 941;
+  z-index: 5;
+  inset: 0;
+  opacity: calc((0.94 - 0.16 * var(--daylight)) * (1 - var(--stars-opacity)));
+  filter: grayscale(calc(0.96 * var(--daylight)))
+    brightness(calc(0.36 + 0.64 * var(--sky-light) + 0.35 * var(--daylight)))
+    saturate(calc(0.55 + 0.45 * var(--sky-light)))
+    sepia(calc(0.13 * var(--daylight)))
+    hue-rotate(calc(181deg * var(--daylight)));
+}
+
+.cloud {
+  left: var(--x);
+  top: var(--y);
+  width: var(--width);
+  aspect-ratio: var(--sprite-width) / var(--sprite-height);
+  background-image: url("assets/clouds-sky.png");
+  background-repeat: no-repeat;
+  /* Match each crop to its rectangle in the shared image. */
+  background-size:
+    calc(100% * var(--sheet-width) / var(--sprite-width))
+    calc(100% * var(--sheet-height) / var(--sprite-height));
+  background-position:
+    calc(100% * var(--sprite-x) / (var(--sheet-width) - var(--sprite-width)))
+    calc(100% * var(--sprite-y) / (var(--sheet-height) - var(--sprite-height)));
+  scale: var(--flip, 1) 1;
+  animation: cloud-drift var(--drift-duration) ease-in-out var(--drift-delay) infinite alternate;
+}
+
+.cloud-wide {
+  --sprite-x: 1167;
+  --sprite-y: 32;
+  --sprite-width: 427;
+  --sprite-height: 175;
+  --drift-duration: 65s;
+  --drift-delay: -26s;
+}
+
+.cloud-mid {
+  --sprite-x: 1339;
+  --sprite-y: 251;
+  --sprite-width: 253;
+  --sprite-height: 69;
+  --drift-duration: 88s;
+  --drift-delay: -54s;
+  opacity: 0.9;
+}
+
+.cloud-far {
+  --sprite-x: 786;
+  --sprite-y: 444;
+  --sprite-width: 155;
+  --sprite-height: 34;
+  --drift-duration: 120s;
+  --drift-delay: -32s;
+  opacity: 0.76;
+}
+
+@keyframes cloud-drift {
+  from { translate: -8% 3%; }
+  to { translate: 8% -3%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cloud {
+    animation: none;
+  }
+}
+
+.landscape,
+.forest,
+.right-island,
+.right-foreground {
+  filter: brightness(calc(0.39 + 0.67 * var(--landscape-light)))
+    saturate(calc(0.63 + (0.37 - 0.10 * var(--twilight)) * var(--landscape-light)))
+    hue-rotate(calc(var(--terrain-hue, 17deg) * var(--twilight) * var(--landscape-light)))
+    contrast(var(--terrain-contrast, 1))
+    sepia(var(--terrain-warmth, 0));
+}
+
+.landscape,
+.forest {
+  width: 100%;
+  left: 0;
+}
+
+.landscape {
+  --terrain-contrast: calc(1 - 0.14 * var(--sunset-light));
+  z-index: 7;
+  top: calc(var(--waterline) - 40%);
+}
+
+.forest {
+  z-index: 8;
+  top: calc(var(--waterline) - 39.4%);
+}
+
+.right-island {
+  --terrain-warmth: calc(0.23 * var(--sunset-light));
+  z-index: 10;
+  top: calc(var(--waterline) - 42.3%);
+  right: 0;
+  width: 64%;
+}
+
+.right-foreground {
+  --terrain-hue: 5deg;
+  --foreground-width: 1671;
+  --foreground-height: 941;
+  z-index: 11;
+  right: -1.5%;
+  bottom: -1%;
+  width: 67%;
+  aspect-ratio: var(--foreground-width) / var(--foreground-height);
+}
+
+.right-foreground img,
+.floe-reflections {
+  position: absolute;
+  inset: 0;
+}
+
+.right-foreground img {
+  width: 100%;
+  height: 100%;
+}
+
+.foreground-bank {
+  filter: sepia(calc(0.28 * var(--sunset-light)));
+}
+
+.foreground-floes {
+  clip-path: polygon(45% 68%, 60% 68%, 60% 80%, 46.7% 80%, 46.7% 94%, 25% 94%, 25% 77%, 45% 77%);
+  mask-image:
+    linear-gradient(#000, #000),
+    radial-gradient(ellipse 7.8% 2.7% at 34% 87%, #0005 40%, transparent 100%),
+    radial-gradient(ellipse 5.3% 2.1% at 42% 85.3%, #0005 40%, transparent 100%),
+    radial-gradient(ellipse 5.2% 2.1% at 53% 74.4%, #0005 40%, transparent 100%);
+  mask-composite: subtract, add, add;
+}
+
+/* Each slice is reflected around its own sloping waterline. */
+.floe-reflection {
+  --slice-width: calc(var(--end-x) - var(--start-x));
+  --slice-height: calc(max(var(--start-y), var(--end-y)) - var(--floe-top));
+  --left-contact: calc(var(--start-y) - var(--floe-top));
+  --right-contact: calc(var(--end-y) - var(--floe-top));
+  --reflection-scale: 0.46;
+
+  position: absolute;
+  left: calc(100% * var(--start-x) / var(--foreground-width));
+  top: calc(100% * var(--floe-top) / var(--foreground-height));
+  width: calc(100% * var(--slice-width) / var(--foreground-width));
+  height: calc(100% * var(--slice-height) / var(--foreground-height));
+  background: url("assets/right-foreground-waterline.png") no-repeat;
+  background-size:
+    calc(100% * var(--foreground-width) / var(--slice-width))
+    calc(100% * var(--foreground-height) / var(--slice-height));
+  background-position:
+    calc(100% * var(--start-x) / (var(--foreground-width) - var(--slice-width)))
+    calc(100% * var(--floe-top) / (var(--foreground-height) - var(--slice-height)));
+  clip-path: polygon(
+    0 0,
+    100% 0,
+    100% calc(100% * var(--right-contact) / var(--slice-height)),
+    0 calc(100% * var(--left-contact) / var(--slice-height))
+  );
+  transform:
+    translateY(calc(100% * (1 + var(--reflection-scale)) * var(--left-contact) / var(--slice-height)))
+    skewY(atan(calc((1 + var(--reflection-scale)) * (var(--end-y) - var(--start-y)) / var(--slice-width))))
+    scaleY(calc(-1 * var(--reflection-scale)));
+  transform-origin: left top;
+  mask-image: linear-gradient(to bottom, transparent, #000b 60%, #000 90%);
+  filter: saturate(0.78) blur(0.7px);
+  opacity: 0.58;
+}
+
+.water {
+  z-index: 6;
+  inset: var(--waterline) 0 0;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.water img {
+  position: absolute;
+  display: block;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  filter: brightness(calc(0.32 + (0.68 + 0.16 * var(--twilight)) * var(--sky-light)))
+    saturate(calc(0.74 + 0.24 * var(--daylight)))
+    hue-rotate(calc(11deg * var(--twilight)));
+}
+
+.water-landscape-reflection {
+  --shadow-lean: calc(0.85 * var(--reflection-lean) * var(--sun-opacity));
+  position: absolute;
+  z-index: 9;
+  top: var(--waterline);
+  left: 0;
+  width: 100%;
+  /* Tilt after placing the mirrored treeline at the waterline. */
+  transform: skewX(var(--shadow-lean)) translateY(37.2%) scaleY(-0.47);
+  transform-origin: center top;
+  mask-image:
+    linear-gradient(to bottom, transparent 31%, #0006 46%, #000c 60%, #000 71%),
+    linear-gradient(to right, transparent, #000 3% 97%, transparent);
+  mask-composite: intersect;
+  filter: saturate(0.72) brightness(0.62) blur(1px);
+  mix-blend-mode: multiply;
+  opacity: calc(0.16 + var(--sun-opacity) * (0.40 - 0.27 * var(--sun-height)));
+}
+
+.landscape[hidden] ~ .water-landscape-reflection,
+.water[hidden] ~ .water-landscape-reflection {
+  display: none;
+}
+
+.water-light {
+  --reflection-center: 24%;
+  --reflection-spread: conic-gradient(
+    from 158deg at var(--light-x) -25%,
+    transparent,
+    #000 13deg 31deg,
+    transparent 44deg
+  );
+}
+
+.water-light-sun {
+  --light-x: var(--sun-x);
+  --light-lean: var(--reflection-lean);
+  --light-opacity: calc(var(--sun-opacity) * (0.18 + 0.78 * var(--twilight)));
+  --light-width: 13%;
+  --light-core: color-mix(in srgb, #fff7c6, var(--sunlight) calc(62% * var(--twilight)));
+  --light-mid: color-mix(in srgb, color-mix(in srgb, #ffce79, var(--sunlight) calc(60% * var(--twilight))) 85%, transparent);
+  --light-edge: color-mix(in srgb, #efa955, transparent 72%);
+  --water-warmth: color-mix(in srgb, #ffd08a, var(--sunlight) calc(60% * var(--twilight)));
+}
+
+.water-light-moon {
+  --light-x: var(--moon-x);
+  --light-lean: calc(-1 * var(--reflection-lean));
+  --light-opacity: calc(0.35 * var(--moon-opacity));
+  --light-width: 10%;
+  --light-core: #e2eeff;
+  --light-mid: #a7c7f5c6;
+  --light-edge: #718fd746;
+}
+
+.water-light-sun::before,
+.water-reflection,
+.water-waves {
+  position: absolute;
+  inset: 0;
+  transform: skewX(var(--light-lean));
+  transform-origin: center top;
+}
+
+.water-light-sun::before {
+  content: "";
+  z-index: 1;
+  background: radial-gradient(
+    ellipse 27% 92% at var(--light-x) 19%,
+    color-mix(in srgb, var(--water-warmth) 52%, transparent),
+    color-mix(in srgb, var(--water-warmth) 41%, transparent) 26%,
+    #f287653e 50%,
+    #e9796019 75%,
+    transparent 100%
+  );
+  mix-blend-mode: screen;
+  opacity: calc(var(--light-opacity) * (0.48 + 0.37 * var(--twilight)));
+}
+
+.water-reflection {
+  z-index: 1;
+  background: radial-gradient(
+    ellipse var(--light-width) 97% at var(--light-x) var(--reflection-center),
+    var(--light-core) 4%,
+    var(--light-mid) 28%,
+    var(--light-edge) 55%,
+    transparent 93%
+  );
+  mask-image: var(--reflection-spread);
+  mix-blend-mode: hard-light;
+  opacity: var(--light-opacity);
+}
+
+.water-waves {
+  z-index: 2;
+  mask-image:
+    var(--reflection-spread),
+    radial-gradient(
+      ellipse var(--light-width) 97% at var(--light-x) var(--reflection-center),
+      #000 13%,
+      #000b 37%,
+      transparent 75%
+    );
+  mask-composite: intersect;
+  /* Bright ripples transmit the light underneath, while troughs dim it. */
+  mix-blend-mode: multiply;
+  opacity: calc(var(--light-opacity) * 0.85);
+}
+
+.water-waves img {
+  /* Keep the water texture aligned while its light mask leans. */
+  transform: skewX(calc(-1 * var(--light-lean)));
+  transform-origin: center top;
+  filter: grayscale(1) brightness(2.2) contrast(2.4);
+}
+
+.controls {
+  display: grid;
+  gap: 0.65rem;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 68rem;
+  margin: 0 auto;
+  padding: 0.8rem 1rem 1rem;
+  font-size: 0.875rem;
+}
+
+.time-control {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 3.1rem;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.time-control input {
+  width: 100%;
+  margin: 0;
+}
+
+.time-control output {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.scene-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 1.25rem;
+}
+
+.layer-controls {
+  flex: 1 1 32rem;
+}
+
+.scene-options fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.scene-options legend {
+  float: left;
+  margin-right: 0.85rem;
+  padding: 0;
+  color: #a7b4c9;
+}
+
+.layer-options,
+.day-glow-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.85rem;
+}
+
+.scene-options label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  white-space: nowrap;
+}
+
+.scene-options input {
+  margin: 0;
+}
