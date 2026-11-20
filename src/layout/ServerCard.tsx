@@ -4,6 +4,7 @@ import { useNotifications } from '../notifications/Notifications';
 import { usePreferences } from '../PreferencesProvider';
 import type { Language } from '../preferences';
 import type { ServerStatus } from '../serverDirectoryTypes';
+import { parseMinecraftMotd } from './minecraftMotd';
 import './server-card.css';
 
 export type MinecraftServer = {
@@ -48,7 +49,7 @@ export function ServerCard({ server }: { server: MinecraftServer }) {
   const notify = useNotifications();
   const formatNumber = new Intl.NumberFormat(language);
   const copyLabel = text.copyServerAddress(name);
-  const plainMotd = motd?.replace(/\u00a7(?:x(?:\u00a7[0-9a-f]){6}|#[0-9a-f]{6}|[0-9a-fk-or])/gi, '').trim();
+  const motdParts = motd ? parseMinecraftMotd(motd) : [];
   const logo = server.logo && <img className="server-card-logo-art" src={server.logo} width={44} height={44} alt="" loading="lazy" />;
   const lastSeen = lastSeenAt !== undefined && (status === 'offline' || status === 'unavailable') ? new Date(lastSeenAt) : undefined;
   const worldAge = worldAgeDays !== undefined
@@ -131,7 +132,9 @@ export function ServerCard({ server }: { server: MinecraftServer }) {
               </span>
             </div>}
           </div>
-          {plainMotd && <p className="server-card-motd">{plainMotd}</p>}
+          {motdParts.some(part => part.text.trim()) && <p className="server-card-motd">
+            {motdParts.map(part => <span key={part.start} style={part.style}>{part.text}</span>)}
+          </p>}
           {modpack && <p className="server-card-modpack"><span>{text.serverModpack}</span> {modpack}</p>}
         </div>
       </div>
