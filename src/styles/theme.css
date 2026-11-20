@@ -1,0 +1,18 @@
+:root {
+  --dye-color: #5e7c16;
+  --text-color: color-mix(in srgb, var(--dye-color) 4%, #f7f7f7);
+  --body-text-color: color-mix(in srgb, var(--dye-color) 7%, #e7e7e7);
+  --muted-text-color: color-mix(in srgb, var(--dye-color) 9%, #cdcdcd);
+  --panel-background: color-mix(in srgb, var(--dye-color) 11%, #141319);
+  --panel-background-raised: color-mix(in srgb, var(--dye-color) 16%, #1b1a20);
+  --panel-border: color-mix(in srgb, var(--dye-color) 48%, #8d8a93);
+  --panel-accent: color-mix(in srgb, var(--dye-color) 50%, #fff);
+  --button-fill: color-mix(in srgb, var(--dye-color) 32%, #100e15);
+  --button-border: color-mix(in srgb, var(--dye-color) 62%, #fff);
+  --button-hover: color-mix(in srgb, var(--dye-color) 40%, #100e15);
+}
+
+dialog:focus,
+:root[data-pointer-input] :focus-visible:not(:is(input, textarea, [contenteditable])) {
+  outline: none;
+}

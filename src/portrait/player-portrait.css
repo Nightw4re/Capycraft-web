@@ -1,0 +1,21 @@
+.info-panel:has(.player-dashboard-preview) {
+  align-self: start;
+}
+
+.player-dashboard-preview p {
+  margin: 0;
+}
+
+.player-portrait {
+  margin-inline: calc(-1 * var(--info-panel-padding));
+  aspect-ratio: 560 / 192;
+  overflow: hidden;
+}
+
+.player-portrait canvas:not([hidden]),
+.player-portrait img {
+  display: block;
+  width: 100%;
+  height: auto;
+  filter: drop-shadow(0 0.35rem 0.5rem rgb(0 0 0 / 36%));
+}

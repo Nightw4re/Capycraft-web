@@ -1,0 +1,227 @@
+import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync } from 'node:fs';
+import { createServer } from 'node:http';
+import { dirname, resolve } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { createServerItemSearch, itemSearchPath } from './itemSearch.mts';
+import { createServerItemRecipeUses, itemRecipeUsesPath } from './itemRecipeUses.mts';
+import { instanceDirectory, itemCatalogDirectories, loadInstances, webcraftToken } from './instances.mts';
+import { catalogPrefix, serveCatalog } from './itemCatalog.mts';
+import { createServerDirectory, serverDirectoryPath } from './serverDirectory.mts';
+import { attachLiveUpdates } from './liveUpdates.mts';
+import { defaultAlias } from '../src/minecraftServers.mjs';
+
+const pollIntervalMs = 60_000;
+const importPollIntervalMs = 30_000;
+const requestTimeoutMs = 5_000;
+const uuidPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+const playerNamePattern = /^[A-Za-z0-9_]{1,16}$/;
+const instancesRoot = instanceDirectory(process.env.CAPYCRAFT_INSTANCE_DIR);
+mkdirSync(instancesRoot, { recursive: true });
+const instances = loadInstances(instancesRoot);
+
+function configuredFeeds(value: string | undefined) {
+  const configError = 'WEBCRAFT_PLAYER_FEEDS must be a JSON array of WebCraft URLs, feed tokens and optional server aliases.';
+  let feeds: unknown;
+  try {
+    feeds = JSON.parse(value || '[]');
+  } catch {
+    throw new Error(configError);
+  }
+  if (!Array.isArray(feeds)) throw new Error(configError);
+
+  return feeds.map((feed: unknown) => {
+    if (!feed || typeof feed !== 'object' || !('url' in feed) || !('token' in feed)
+      || typeof feed.url !== 'string' || !URL.canParse(feed.url)
+      || typeof feed.token !== 'string' || !/^[A-Za-z0-9_-]{43,128}$/.test(feed.token)) {
+      throw new Error(configError);
+    }
+    const url = new URL(feed.url);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+      throw new Error(configError);
+    }
+    const server = 'server' in feed ? feed.server : defaultAlias;
+    if (typeof server !== 'string' || !instances.has(server)) throw new Error(configError);
+    return { url, token: feed.token, server };
+  });
+}
+
+function parsePlayers(data: unknown) {
+  if (!data || typeof data !== 'object' || !('players' in data) || !Array.isArray(data.players)) {
+    throw new Error('Invalid WebCraft player feed.');
+  }
+
+  return data.players.map((player: unknown) => {
+    if (!player || typeof player !== 'object' || !('uuid' in player) || !('name' in player) || !('lastSeenAt' in player)
+      || typeof player.uuid !== 'string' || !uuidPattern.test(player.uuid)
+      || typeof player.name !== 'string' || !playerNamePattern.test(player.name)
+      || typeof player.lastSeenAt !== 'number' || !Number.isSafeInteger(player.lastSeenAt) || player.lastSeenAt < 0) {
+      throw new Error('Invalid WebCraft player record.');
+    }
+    return { uuid: player.uuid.toLowerCase(), name: player.name, lastSeenAt: player.lastSeenAt };
+  });
+}
+
+const feeds = configuredFeeds(process.env.WEBCRAFT_PLAYER_FEEDS);
+for (const { alias, webcraft } of instances.values()) {
+  if (!webcraft?.playerHistory || feeds.some(feed => feed.server === alias)) continue;
+  const token = webcraftToken(webcraft.tokenEnv);
+  if (token) feeds.push({ server: alias, token, url: new URL('/api/v1/internal/players', webcraft.origin) });
+}
+const databasePath = resolve(process.env.CAPYCRAFT_PLAYER_DATABASE || 'data/players.sqlite');
+mkdirSync(dirname(databasePath), { recursive: true });
+const database = new DatabaseSync(databasePath);
+database.exec('BEGIN IMMEDIATE');
+const hasServerPlayers = database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'server_players'").get();
+database.exec(`
+  CREATE TABLE IF NOT EXISTS players (
+    uuid TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    last_seen_at INTEGER NOT NULL
+  ) STRICT;
+  CREATE TABLE IF NOT EXISTS server_players (
+    server TEXT NOT NULL,
+    uuid TEXT NOT NULL,
+    name TEXT NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    PRIMARY KEY (server, uuid)
+  ) STRICT;
+`);
+if (!hasServerPlayers && instances.has(defaultAlias)) {
+  database.prepare('INSERT INTO server_players SELECT ?, uuid, name, last_seen_at FROM players').run(defaultAlias);
+}
+database.exec('COMMIT');
+
+const savePlayer = database.prepare(`
+  INSERT INTO players (uuid, name, last_seen_at) VALUES (?, ?, ?)
+  ON CONFLICT (uuid) DO UPDATE SET name = excluded.name, last_seen_at = excluded.last_seen_at
+  WHERE excluded.last_seen_at > players.last_seen_at
+     OR (excluded.last_seen_at = players.last_seen_at AND excluded.name > players.name)
+`);
+const selectNames = database.prepare('SELECT name FROM players ORDER BY name COLLATE NOCASE, name, uuid');
+const saveServerPlayer = database.prepare(`
+  INSERT INTO server_players (server, uuid, name, last_seen_at) VALUES (?, ?, ?, ?)
+  ON CONFLICT (server, uuid) DO UPDATE SET name = excluded.name, last_seen_at = excluded.last_seen_at
+  WHERE excluded.last_seen_at > server_players.last_seen_at
+     OR (excluded.last_seen_at = server_players.last_seen_at AND excluded.name > server_players.name)
+`);
+const selectServerNames = database.prepare('SELECT name FROM server_players WHERE server = ? ORDER BY name COLLATE NOCASE, name, uuid');
+
+async function syncFeed({ url, token, server }: (typeof feeds)[number]) {
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+    redirect: 'error',
+    signal: AbortSignal.timeout(requestTimeoutMs),
+  });
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error(`WebCraft returned HTTP ${response.status}.`);
+  }
+  const players = parsePlayers(await response.json());
+
+  database.exec('BEGIN');
+  try {
+    for (const { uuid, name, lastSeenAt } of players) {
+      savePlayer.run(uuid, name, lastSeenAt);
+      saveServerPlayer.run(server, uuid, name, lastSeenAt);
+    }
+    database.exec('COMMIT');
+  } catch (error) {
+    database.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+async function syncPlayers() {
+  await Promise.all(feeds.map(async feed => {
+    try {
+      await syncFeed(feed);
+    } catch (error) {
+      const message = error instanceof Error && /^((Invalid WebCraft)|(WebCraft returned))/.test(error.message)
+        ? error.message
+        : 'Could not load or store the player feed.';
+      console.warn(`WebCraft player sync at ${feed.url.origin}: ${message}`);
+    }
+  }));
+  setTimeout(() => void syncPlayers(), pollIntervalMs);
+}
+
+function pollItemImports(server: string, inbox: string) {
+  let importing = false;
+  const checkInbox = () => {
+    if (importing) return;
+    importing = true;
+    const child = spawn(process.execPath, [resolve(import.meta.dirname, '../scripts/import-items.mjs'), '--inbox-sqlite'], {
+      stdio: 'inherit',
+      windowsHide: true,
+      env: { ...process.env, CAPYCRAFT_ITEM_SERVER: server, CAPYCRAFT_ITEM_IMPORT_DIR: inbox },
+    });
+    child.once('error', error => console.warn(`Item import could not start: ${error.message}`));
+    child.once('close', () => { importing = false; });
+  };
+  checkInbox();
+  setInterval(checkInbox, importPollIntervalMs).unref();
+}
+
+const catalogDirectory = resolve(process.env.CAPYCRAFT_ITEM_CATALOG_DIR || 'public/item-catalog');
+const catalogs = itemCatalogDirectories(instances, catalogDirectory);
+const searchItems = createServerItemSearch(catalogs);
+const recipeUses = createServerItemRecipeUses(catalogs);
+const hasLegacyPlayerFeed = feeds.some(feed => feed.server === defaultAlias);
+const directory = createServerDirectory(database, instances, () =>
+  hasLegacyPlayerFeed || existsSync(resolve(catalogDirectory, 'catalog.json')), catalogs,
+);
+
+const api = createServer((request, response) => {
+  const path = request.url?.split('?', 1)[0];
+  if (path === serverDirectoryPath) return void directory.serve(request, response);
+  if (path?.startsWith(catalogPrefix)) {
+    void serveCatalog(catalogs, path.slice(catalogPrefix.length), request, response);
+    return;
+  }
+  if (path === itemSearchPath && request.url) {
+    void searchItems(request, response, new URL(request.url, 'http://localhost'));
+    return;
+  }
+  if (path === itemRecipeUsesPath && request.url) {
+    void recipeUses(request, response, new URL(request.url, 'http://localhost'));
+    return;
+  }
+  response.setHeader('Content-Type', 'application/json; charset=utf-8');
+  response.setHeader('Cache-Control', 'no-store');
+  if (path !== '/api/players' || !request.url) {
+    response.writeHead(404).end(JSON.stringify({ error: 'not_found' }));
+    return;
+  }
+  if (request.method !== 'GET') {
+    response.writeHead(405, { Allow: 'GET' }).end(JSON.stringify({ error: 'method_not_allowed' }));
+    return;
+  }
+  const server = new URL(request.url, 'http://localhost').searchParams.get('server');
+  if (server !== null && !instances.has(server)) {
+    response.writeHead(404).end(JSON.stringify({ error: 'server_not_found' }));
+    return;
+  }
+  try {
+    const rows = server === null ? selectNames.all() : selectServerNames.all(server);
+    const players = rows.map(row => row.name);
+    response.end(JSON.stringify({ players }));
+  } catch {
+    response.writeHead(500).end(JSON.stringify({ error: 'player_list_unavailable' }));
+  }
+});
+const live = attachLiveUpdates(api, directory.snapshot, catalogs);
+api.listen(8787, '127.0.0.1', () => {
+  console.log('Capycraft player API listening on http://127.0.0.1:8787');
+  directory.start(live.refreshDirectory);
+  const inboxes = new Map<string, string>();
+  const legacyServer = process.env.CAPYCRAFT_ITEM_SERVER?.trim() || defaultAlias;
+  if (instances.has(legacyServer)) {
+    inboxes.set(resolve(process.env.CAPYCRAFT_ITEM_IMPORT_DIR?.trim() || 'data/item-imports'), legacyServer);
+  }
+  for (const { alias, inbox } of instances.values()) {
+    if (inbox) inboxes.set(inbox, alias);
+  }
+  for (const [inbox, alias] of inboxes) pollItemImports(alias, inbox);
+  if (feeds.length > 0) void syncPlayers();
+});

@@ -1,0 +1,9 @@
+{
+  "version": 3,
+  "detailVersion": 2,
+  "statusFile": "import-status.json",
+  "statusHeartbeatMs": 15000,
+  "pageSize": 100,
+  "atlasColumns": 10,
+  "tileSize": 64
+}

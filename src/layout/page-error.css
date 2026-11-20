@@ -1,0 +1,81 @@
+.page-error {
+  box-sizing: border-box;
+  display: grid;
+  inline-size: min(100%, 42rem);
+  margin-inline: auto;
+  border: 1px solid var(--panel-border);
+  background: var(--panel-background);
+  box-shadow: 0 0.5rem 1.5rem rgb(12 9 23 / 26%);
+}
+
+.page-error-copy {
+  align-self: center;
+  padding: clamp(1.25rem, 4vw, 2.25rem);
+}
+
+.page-error h1 {
+  margin: 0;
+  font: 700 clamp(1.65rem, 4vw, 2.375rem) / 1.1 var(--font-heading);
+}
+
+.page-error h1 span {
+  display: block;
+  margin-block-end: 0.375rem;
+  color: var(--panel-accent);
+  font-size: clamp(3rem, 8vw, 5rem);
+  line-height: 0.9;
+}
+
+.page-error p {
+  margin-block: 0.75rem 1.25rem;
+  color: var(--body-text-color);
+  line-height: 1.5;
+}
+
+.page-error a {
+  display: inline-flex;
+  align-items: center;
+  min-block-size: 2.75rem;
+  padding: 0.25rem 0.75rem;
+  border: 1px solid var(--button-border);
+  background: var(--button-fill);
+  color: var(--text-color);
+  font-weight: 600;
+  text-underline-offset: 0.2em;
+}
+
+.page-error a:hover {
+  background: var(--button-hover);
+}
+
+.page-error a:focus-visible {
+  outline: 2px solid var(--panel-accent);
+  outline-offset: 2px;
+}
+
+.page-error-art {
+  position: relative;
+  min-block-size: 7rem;
+  overflow: hidden;
+  border-block-start: 1px solid var(--panel-border);
+  background: radial-gradient(ellipse at 50% 85%, var(--panel-background-raised), var(--panel-background));
+}
+
+.page-error-art img {
+  position: absolute;
+  inset-block-start: calc(50% - 13.5rem);
+  inset-inline-start: calc(50% - 5.25rem);
+  inline-size: 32rem;
+  max-inline-size: none;
+}
+
+@media (min-width: 34.375rem) {
+  .page-error:has(.page-error-art) {
+    grid-template-columns: minmax(0, 1fr) 40%;
+  }
+
+  .page-error-art {
+    border-block-start: 0;
+    border-inline-start: 1px solid var(--panel-border);
+  }
+}

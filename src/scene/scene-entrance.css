@@ -1,0 +1,173 @@
+.scene-entrance {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  flex-direction: column;
+  block-size: 100vh;
+  block-size: 100dvh;
+  overflow: clip;
+  background: #121331;
+}
+
+.scene-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-block-size: 0;
+  overflow: auto;
+  overflow-x: hidden;
+  overscroll-behavior-block: contain;
+  scroll-padding-block-end: 34svh;
+  color-scheme: dark;
+}
+
+.scene-panels {
+  position: relative;
+  z-index: 1;
+  box-sizing: border-box;
+  flex: 1 0 auto;
+  padding-block-end: 44dvh;
+}
+
+.scene-content:focus-visible {
+  outline: none;
+}
+
+.scene-entrance[data-intro="pending"] {
+  visibility: hidden;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  @supports (backdrop-filter: blur(1px)) {
+    .scene-entrance[data-intro="running"] {
+      --intro-logo-width: min(82%, 120svh, 58rem);
+      --drop-duration: 760ms;
+      --dock-duration: 580ms;
+      --dock-delay: calc(var(--drop-duration) + 200ms);
+      --focus-delay: calc(var(--dock-delay) + var(--dock-duration));
+      --control-duration: 150ms;
+      --focus-duration: calc(4 * var(--control-duration) + 10ms);
+    }
+
+    .scene-entrance[data-intro="running"]::after {
+      position: absolute;
+      z-index: 4;
+      inset: 0;
+      content: "";
+      pointer-events: none;
+      backdrop-filter: blur(7px);
+    }
+
+    .scene-entrance[data-intro="running"] .scene-content {
+      overflow: hidden;
+      visibility: hidden;
+    }
+
+    .scene-entrance[data-intro="running"] .scene-islands {
+      visibility: visible;
+    }
+
+    .scene-entrance[data-intro="running"] .scene-header-panel {
+      translate: 0 calc(-100% - 1rem);
+    }
+
+    .scene-entrance[data-intro="running"] .scene-logo {
+      top: 50svh;
+      left: 50%;
+      width: var(--intro-logo-width);
+      translate: -50% calc(-100% - 50svh - 1rem);
+    }
+
+    .scene-entrance[data-intro="running"] .scene-logo {
+      animation: drop-logo var(--drop-duration) both,
+        dock-logo var(--dock-duration) var(--dock-delay) cubic-bezier(.32, .02, .19, 1) forwards;
+    }
+
+    .scene-entrance[data-intro="running"] .scene-header-panel {
+      animation: reveal-header 440ms var(--dock-delay) ease-out forwards;
+    }
+
+    /* Reveal controls from right to left while the scene comes into focus. */
+    .scene-entrance[data-intro="running"] .header-controls > * {
+      --control-order: 0;
+      animation: slide-in-header-item var(--control-duration)
+        calc(var(--focus-delay) + var(--control-order) * var(--control-duration)) ease-out both;
+    }
+
+    .scene-entrance[data-intro="running"] .header-controls > :nth-last-child(2) {
+      --control-order: 1;
+    }
+
+    .scene-entrance[data-intro="running"] .header-controls > :nth-last-child(3) {
+      --control-order: 2;
+    }
+
+    .scene-entrance[data-intro="running"] .header-controls > :nth-last-child(4) {
+      --control-order: 3;
+    }
+
+    .scene-entrance[data-intro="running"] .scene-header-navigation > * {
+      animation: slide-in-header-item var(--navigation-duration)
+        calc(var(--focus-delay) + 75ms + var(--navigation-order, 0) * var(--navigation-stagger)) ease-out both;
+    }
+
+    .scene-entrance[data-intro="running"]::after {
+      animation: focus-scene var(--focus-duration) var(--focus-delay) ease-out forwards;
+    }
+  }
+}
+
+@keyframes focus-scene {
+  to { backdrop-filter: blur(0); }
+}
+
+@keyframes drop-logo {
+  0% {
+    translate: -50% calc(-100% - 50svh - 1rem);
+    animation-timing-function: cubic-bezier(.42, 0, .9, .7);
+  }
+
+  50%, 76%, 92% {
+    translate: -50% -50%;
+    animation-timing-function: ease-out;
+  }
+
+  64% {
+    translate: -50% calc(-50% - min(24px, 4svh));
+    animation-timing-function: ease-in;
+  }
+
+  85% {
+    translate: -50% calc(-50% - min(9px, 1.5svh));
+    animation-timing-function: ease-in;
+  }
+
+  96% {
+    translate: -50% calc(-50% - min(3px, 0.5svh));
+    animation-timing-function: ease-in;
+  }
+
+  100% { translate: -50% -50%; }
+}
+
+@keyframes dock-logo {
+  from { translate: -50% -50%; }
+
+  to {
+    top: calc(var(--header-height) / 2);
+    left: var(--header-inset);
+    width: var(--header-logo-width);
+    translate: 0 -50%;
+  }
+}
+
+@keyframes reveal-header {
+  to { translate: 0 0; }
+}
+
+@keyframes slide-in-header-item {
+  from { opacity: 0; translate: 0 -0.5rem; }
+  to { opacity: 1; translate: 0 0; }
+}

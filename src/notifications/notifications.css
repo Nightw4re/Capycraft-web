@@ -1,0 +1,24 @@
+.notification-region {
+  position: fixed;
+  z-index: 10;
+  inset-inline-end: max(1rem, env(safe-area-inset-right));
+  inset-block-end: max(1rem, env(safe-area-inset-bottom));
+  max-inline-size: min(25rem, calc(100% - 2rem));
+  pointer-events: none;
+}
+
+.notification-region p {
+  margin: 0;
+  padding: 0.625rem 0.875rem;
+  border: 1px solid var(--panel-border);
+  border-inline-start: 3px solid var(--panel-accent);
+  background: var(--panel-background-raised);
+  color: var(--text-color);
+  box-shadow: 0 0.35rem 1rem rgb(0 0 0 / 40%);
+  font: 0.95rem/1.4 var(--font-body);
+  overflow-wrap: anywhere;
+}
+
+.notification-region p[data-tone="error"] {
+  border-inline-start-color: #f1b2a0;
+}

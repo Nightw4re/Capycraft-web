@@ -1,0 +1,182 @@
+.home-highlight {
+  display: grid;
+  grid-template-columns: clamp(12rem, 24%, 18rem) minmax(0, 1fr);
+  margin-block-end: 1rem;
+  border: 1px solid var(--panel-border);
+  background: var(--panel-background);
+  box-shadow: 0 0.5rem 1.5rem rgb(12 9 23 / 26%);
+}
+
+.home-highlight-art {
+  position: relative;
+  min-block-size: 7rem;
+  overflow: hidden;
+  border-inline-end: 1px solid var(--panel-border);
+  background: radial-gradient(
+    ellipse at 55% 95%,
+    color-mix(in srgb, var(--dye-color) 55%, #24232b),
+    color-mix(in srgb, var(--dye-color) 30%, #1b1a20) 65%,
+    var(--panel-background)
+  );
+}
+
+.home-highlight-art img {
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+  object-fit: cover;
+}
+
+.home-highlight-art .home-highlight-winter-capybara {
+  position: absolute;
+  inset-block-start: calc(50% - 18.6rem);
+  inset-inline-start: calc(50% - 7.25rem);
+  inline-size: 44rem;
+  block-size: auto;
+  max-inline-size: none;
+}
+
+.home-highlight-art > .home-highlight-slide {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+}
+
+.home-highlight-copy {
+  align-self: center;
+  padding: 1rem clamp(1rem, 3vw, 1.75rem);
+}
+
+.home-highlight-copy h1 {
+  margin: 0 0 0.375rem;
+  color: var(--panel-accent);
+  font-family: var(--font-heading);
+  font-size: 1.125rem;
+  line-height: 1.15;
+}
+
+.home-highlight-facts {
+  display: grid;
+  max-inline-size: 70ch;
+  overflow: clip;
+}
+
+/* The tallest fact sets the height so rotation does not move the panels below. */
+.home-highlight-facts > .home-highlight-slide {
+  grid-area: 1 / 1;
+}
+
+.home-highlight-slide[data-state="hidden"],
+.home-highlight-slide[data-state="previous"] {
+  visibility: hidden;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .home-highlight {
+    --slide-direction: 1;
+    --slide-duration: 360ms;
+  }
+
+  .home-highlight[data-direction="previous"] {
+    --slide-direction: -1;
+  }
+
+  .home-highlight-art {
+    --slide-distance: 100%;
+  }
+
+  .home-highlight-facts {
+    --slide-distance: clamp(1.5rem, 8vw, 4rem);
+    --slide-opacity: 0;
+  }
+
+  .home-highlight-slide[data-state="current"] {
+    animation: home-highlight-enter var(--slide-duration) ease-in-out;
+  }
+
+  .home-highlight-slide[data-state="previous"] {
+    animation: home-highlight-exit var(--slide-duration) ease-in-out;
+    pointer-events: none;
+  }
+
+  @keyframes home-highlight-enter {
+    from {
+      translate: calc(var(--slide-direction) * var(--slide-distance));
+      opacity: var(--slide-opacity, 1);
+    }
+  }
+
+  @keyframes home-highlight-exit {
+    from {
+      visibility: visible;
+    }
+
+    to {
+      visibility: visible;
+      translate: calc(-1 * var(--slide-direction) * var(--slide-distance));
+      opacity: var(--slide-opacity, 1);
+    }
+  }
+}
+
+.home-highlight-copy h2 {
+  margin: 0 0 0.375rem;
+  font-family: var(--font-heading);
+  font-size: clamp(1.45rem, 3vw, 1.9rem);
+  line-height: 1.15;
+}
+
+.home-highlight-copy p {
+  margin: 0;
+  color: var(--body-text-color);
+  line-height: 1.45;
+}
+
+.home-highlight-controls {
+  display: flex;
+  gap: 0.375rem;
+  margin-block-start: 0.75rem;
+}
+
+.home-highlight-controls button {
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  flex: none;
+  inline-size: 2.75rem;
+  block-size: 2.75rem;
+  padding: 0;
+  border: 1px solid var(--button-border);
+  background: var(--button-fill);
+  color: var(--text-color);
+  cursor: pointer;
+}
+
+.home-highlight-rotation {
+  margin-inline-start: auto;
+}
+
+.home-highlight-controls button:hover {
+  background: var(--button-hover);
+}
+
+.home-highlight-controls button:focus-visible {
+  outline: 2px solid var(--panel-accent);
+  outline-offset: 2px;
+}
+
+.home-highlight-controls svg {
+  inline-size: 1.25rem;
+  block-size: 1.25rem;
+}
+
+@media (max-width: 34.375rem) {
+  .home-highlight {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .home-highlight-art {
+    border-inline-end: 0;
+    border-block-end: 1px solid var(--panel-border);
+  }
+}

@@ -1,0 +1,115 @@
+import { existsSync, readFileSync, readdirSync, type Dirent } from 'node:fs';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { catalogSubdirectory, defaultAlias, defaultTabs, isServerAlias, type ServerPage } from '../src/minecraftServers.mjs';
+
+type Exposure = 'public' | 'internal';
+
+export type Instance = {
+  alias: string;
+  tabs: readonly ServerPage[];
+  inbox?: string;
+  catalog?: string;
+  webcraft?: {
+    origin: string;
+    tokenEnv?: string;
+    info: Exposure;
+    status: Exposure;
+    playerHistory: boolean;
+  };
+};
+
+export function instanceDirectory(path?: string, root = process.cwd()) {
+  const directory = resolve(root, path?.trim() || 'data/instances');
+  for (const publicFolder of ['public', 'dist']) {
+    const fromPublic = relative(resolve(root, publicFolder), directory);
+    if (!isAbsolute(fromPublic) && fromPublic !== '..' && !fromPublic.startsWith(`..${sep}`)) {
+      throw new Error('CAPYCRAFT_INSTANCE_DIR must be outside public and dist.');
+    }
+  }
+  return directory;
+}
+
+export function loadInstances(directory: string): ReadonlyMap<string, Instance> {
+  const instances = new Map<string, Instance>();
+  let folders: Dirent[];
+  try {
+    folders = readdirSync(directory, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    folders = [];
+  }
+
+  for (const folder of folders) {
+    if (!folder.isDirectory()) continue;
+    const instancePath = join(directory, folder.name);
+    const configPath = join(instancePath, 'server.json');
+    let raw: string;
+    try {
+      raw = readFileSync(configPath, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
+    try {
+      const config: unknown = JSON.parse(raw);
+      const instance = parseInstance(folder.name, config, instancePath);
+      if (instances.has(instance.alias)) throw new Error(`Duplicate server alias ${instance.alias}.`);
+      instances.set(instance.alias, instance);
+    } catch (cause) {
+      throw new Error(`Invalid server configuration at ${configPath}.`, { cause });
+    }
+  }
+
+  // Existing installations can still use the default catalog before configuring a WebCraft listener.
+  if (!instances.size) instances.set(defaultAlias, { alias: defaultAlias, tabs: defaultTabs });
+  return instances;
+}
+
+export function itemCatalogDirectory(instance: Instance, legacyDirectory: string) {
+  const legacy = resolve(legacyDirectory, catalogSubdirectory(instance.alias));
+  if (!instance.catalog || existsSync(join(legacy, 'catalog.json'))) return legacy;
+  return instance.catalog;
+}
+
+export function itemCatalogDirectories(instances: ReadonlyMap<string, Instance>, legacyDirectory: string) {
+  return new Map(Array.from(instances, ([alias, instance]) => [alias, itemCatalogDirectory(instance, legacyDirectory)]));
+}
+
+function parseInstance(folder: string, value: unknown, directory: string): Instance {
+  if (!value || typeof value !== 'object' || !('webcraftUrl' in value) || typeof value.webcraftUrl !== 'string') {
+    throw new Error('Set webcraftUrl to the WebCraft HTTP origin.');
+  }
+  const alias = 'alias' in value ? value.alias : folder;
+  if (!isServerAlias(alias)) throw new Error('Use lowercase letters, digits, and hyphens in the server alias.');
+  const url = new URL(value.webcraftUrl);
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
+    throw new Error('webcraftUrl must be an HTTP or HTTPS origin without credentials or a path.');
+  }
+  const tokenEnv = 'tokenEnv' in value ? value.tokenEnv : undefined;
+  if (tokenEnv !== undefined && (typeof tokenEnv !== 'string' || !/^[A-Z][A-Z0-9_]*$/.test(tokenEnv))) {
+    throw new Error('tokenEnv must name an environment variable.');
+  }
+  const info = 'infoExposure' in value ? value.infoExposure : 'public';
+  const status = 'statusExposure' in value ? value.statusExposure : tokenEnv ? 'internal' : 'public';
+  if ((info !== 'public' && info !== 'internal') || (status !== 'public' && status !== 'internal')) {
+    throw new Error('Feed exposure must be public or internal.');
+  }
+  const playerHistory = 'playerHistory' in value ? value.playerHistory : false;
+  if (typeof playerHistory !== 'boolean' || (!tokenEnv && (info === 'internal' || status === 'internal' || playerHistory))) {
+    throw new Error('Internal feeds require tokenEnv.');
+  }
+  const tabs = 'tabs' in value ? value.tabs : defaultTabs;
+  if (!Array.isArray(tabs) || !tabs.every(tab => tab === 'items' || tab === 'players') || new Set(tabs).size !== tabs.length) {
+    throw new Error('tabs must list items and players at most once each.');
+  }
+  return {
+    alias, tabs, inbox: join(directory, 'imports'), catalog: join(directory, 'catalog'),
+    webcraft: { origin: url.origin, tokenEnv, info, status, playerHistory },
+  };
+}
+
+export function webcraftToken(variable: string | undefined) {
+  const token = variable && process.env[variable];
+  if (!token || !/^[A-Za-z0-9_-]{43,128}$/.test(token)) return undefined;
+  return token;
+}

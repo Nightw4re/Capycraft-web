@@ -1,14 +1,22 @@
-# Pravidla práce v Capycraft Web
+# Capycraft Web repository guidance
 
-[README.md](README.md) popisuje účel webu, aktuální stav a vstupní soubory. Starší návrhy a prototypy hledej v historii Gitu.
+[README.md](README.md) describes the site's purpose, current state, and entry points. Earlier designs and prototypes are in Git history.
 
-## Změny v repozitáři
+## Repository language
 
-- Před úpravou zkontroluj aktuální větev, `git status --short --branch` a diff souborů, kterých se úkol týká. Zachovej rozpracované změny ostatních.
-- Před commitem zkontroluj `git diff --check` a obsah připravený v indexu. Přidávej soubory výslovně podle rozsahu úkolu. V popisu výsledku uveď provedené ověření a případná omezení.
+- Use English for repository content, including documentation, developer-facing notes, and code comments. Write localized text in its target language.
 
-## Ověření podle změny
+## Working in chats
 
-- Web otevři přes běžný vstup uvedený v README. V prohlížeči zkontroluj desktop a úzký mobilní náhled.
-- U obrazových podkladů zaznamenej původ a roli. Ověř načtení přes relativní cestu, potřebnou průhlednost a výsledný ořez ve scéně.
-- U dokumentace ověř místní odkazy a soulad s aktuální implementací. Plánované funkce označ jako plánované.
+- Work on project requests in the chat where the user made them. Open another chat for the same task only when the user explicitly asks for one.
+
+## Repository changes
+
+- Before editing, check the current branch, run `git status --short --branch`, and inspect the diff for the affected files. Preserve other people's work in progress.
+- Before committing, run `git diff --check` and review the staged changes. Stage the files that belong to the task explicitly. Report the checks performed and any relevant limitations.
+
+## Verification
+
+- Open the site using the local development server described in the README. Check the desktop and narrow mobile layouts in the browser.
+- For images, record the source and purpose. Verify that relative paths resolve, transparency is suitable, and crops look right in the scene.
+- For documentation, verify local links and check that the text matches the current implementation. Label planned features as planned.
