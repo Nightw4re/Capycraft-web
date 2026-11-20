@@ -48,6 +48,7 @@ export function ServerCard({ server }: { server: MinecraftServer }) {
   const notify = useNotifications();
   const formatNumber = new Intl.NumberFormat(language);
   const copyLabel = text.copyServerAddress(name);
+  const plainMotd = motd?.replace(/\u00a7(?:x(?:\u00a7[0-9a-f]){6}|#[0-9a-f]{6}|[0-9a-fk-or])/gi, '').trim();
   const logo = server.logo && <img className="server-card-logo-art" src={server.logo} width={44} height={44} alt="" loading="lazy" />;
   const lastSeen = lastSeenAt !== undefined && (status === 'offline' || status === 'unavailable') ? new Date(lastSeenAt) : undefined;
   const worldAge = worldAgeDays !== undefined
@@ -130,8 +131,8 @@ export function ServerCard({ server }: { server: MinecraftServer }) {
               </span>
             </div>}
           </div>
-          {motd && <p className="server-card-motd">{motd}</p>}
-          {modpack && <p className="server-card-motd"><span>{text.serverModpack}</span> {modpack}</p>}
+          {plainMotd && <p className="server-card-motd">{plainMotd}</p>}
+          {modpack && <p className="server-card-modpack"><span>{text.serverModpack}</span> {modpack}</p>}
         </div>
       </div>
 

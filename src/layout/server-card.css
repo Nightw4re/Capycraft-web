@@ -30,10 +30,15 @@
   gap: 0.125rem;
 }
 
-.server-card-motd {
+.server-card-motd,
+.server-card-modpack {
   margin: 0;
   color: var(--body-text-color);
   font-size: 0.875rem;
+}
+
+.server-card-motd {
+  white-space: pre-line;
 }
 
 .server-card-status {
@@ -102,7 +107,7 @@
   color: var(--muted-text-color);
 }
 
-.server-card-motd span,
+.server-card-modpack span,
 .server-card-address-label,
 .server-card dt {
   color: var(--muted-text-color);
