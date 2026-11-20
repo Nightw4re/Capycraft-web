@@ -15,7 +15,6 @@ export type MinecraftServer = {
   address?: string;
   players?: { current?: number; max?: number };
   uptimeMinutes?: number;
-  totalUptimeMinutes?: number;
   worldAgeDays?: number;
   worldAgeMinutes?: number;
   status?: ServerStatus;
@@ -39,7 +38,7 @@ function formatDuration(minutes: number, language: Language) {
 
 export function ServerCard({ server }: { server: MinecraftServer }) {
   const { language, text } = usePreferences();
-  const { address, motd, name, players, uptimeMinutes, totalUptimeMinutes, worldAgeDays, worldAgeMinutes,
+  const { address, motd, name, players, uptimeMinutes, worldAgeDays, worldAgeMinutes,
     status, lastSeenAt, modpack } = server;
   const nameId = useId();
   const statusId = useId();
@@ -148,10 +147,6 @@ export function ServerCard({ server }: { server: MinecraftServer }) {
         <div>
           <dt>{text.serverUptime}</dt>
           <dd>{uptimeMinutes === undefined ? unavailableStat : formatDuration(uptimeMinutes, language)}</dd>
-        </div>
-        <div>
-          <dt>{text.serverTotalUptime}</dt>
-          <dd>{totalUptimeMinutes === undefined ? unavailableStat : formatDuration(totalUptimeMinutes, language)}</dd>
         </div>
         {worldAge !== undefined && <div>
           <dt>{text.serverWorldAge}</dt>
