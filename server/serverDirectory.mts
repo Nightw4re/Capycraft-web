@@ -2,17 +2,19 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
+import { serverDirectoryPath } from '../src/liveUpdates.mts';
 import type { ServerInformation, ServerStatus, ServerSummary } from '../src/serverDirectoryTypes.ts';
 import { webcraftToken, type Instance } from './instances.mts';
+import { subscribeWebcraftDirectory, type DirectoryFeed } from './webcraftDirectorySocket.mts';
+import type { FeedResult } from './webcraftSocket.mts';
 
-export const serverDirectoryPath = '/api/servers';
+export { serverDirectoryPath };
 const pollInterval = 60_000;
 const timeout = 5_000;
 
-type PollResult = { reachable: boolean; data?: unknown; httpStatus?: number };
 type Snapshot = { status: ServerStatus; information?: ServerInformation; lastSeenAt?: number; fresh: boolean };
 
-async function readFeed(url: string, token?: string): Promise<PollResult> {
+async function readFeed(url: string, token?: string): Promise<FeedResult> {
   let response;
   try {
     response = await fetch(url, {
@@ -73,6 +75,7 @@ function readInformation(value: unknown): ServerInformation | undefined {
     uptimeSeconds: wholeNumber(data.uptimeSeconds),
     totalUptimeSeconds: wholeNumber(data.totalUptimeSeconds),
     worldAgeDays: wholeNumber(data.worldAgeDays),
+    worldAgeMinutes: wholeNumber(data.worldAgeMinutes),
     modpack: modpackName || modpackVersion ? { name: modpackName, version: modpackVersion } : undefined,
   };
   if (Object.values(information).some(value => value !== undefined)) return information;
@@ -109,7 +112,7 @@ export function createServerDirectory(
     if (!webcraft) return;
     const { origin } = webcraft;
     const token = webcraftToken(webcraft.tokenEnv);
-    async function request(feed: 'server-info' | 'server-status', exposure: 'public' | 'internal'): Promise<PollResult> {
+    async function request(feed: DirectoryFeed, exposure: 'public' | 'internal'): Promise<FeedResult> {
       const internal = exposure === 'internal';
       if (internal && !token) return { reachable: true };
       const url = `${origin}/api/v1/${internal ? 'internal/' : ''}${feed}`;
@@ -123,18 +126,23 @@ export function createServerDirectory(
     const [statusResult, infoResult] = await Promise.all([
       request('server-status', webcraft.status), request('server-info', webcraft.info),
     ]);
+    applyResults(alias, statusResult, infoResult, true);
+  }
+
+  function applyResults(alias: string, statusResult: FeedResult, infoResult: FeedResult, received: boolean) {
     const reported = fields(statusResult.data)?.status;
     const status = reported === 'starting' || reported === 'ready' || reported === 'stopping' ? reported : undefined;
     const current = snapshots.get(alias)!;
     const information = readInformation(infoResult.data);
     const fresh = status === 'ready' && information !== undefined;
-    if (status || information) {
+    if (received && (status || information)) {
       const lastSeenAt = Date.now();
       const latestInformation = information && !fresh ? {
         ...information,
         maxPlayers: information.maxPlayers ?? current.information?.maxPlayers,
         totalUptimeSeconds: information.totalUptimeSeconds ?? current.information?.totalUptimeSeconds,
         worldAgeDays: information.worldAgeDays ?? current.information?.worldAgeDays,
+        worldAgeMinutes: information.worldAgeMinutes ?? current.information?.worldAgeMinutes,
       } : information ?? current.information;
       save.run(alias, latestInformation ? JSON.stringify(latestInformation) : null, lastSeenAt);
       current.lastSeenAt = lastSeenAt;
@@ -145,16 +153,52 @@ export function createServerDirectory(
       : current.lastSeenAt === undefined ? 'waiting' : 'offline');
   }
 
-  async function pollAll(onChange: () => void) {
-    await Promise.all(Array.from(instances.values(), async instance => {
-      try {
-        await poll(instance);
-      } catch (error) {
-        console.warn(`Could not refresh server information for ${instance.alias}.`, error);
+  function start(onChange: () => void) {
+    const polling: Instance[] = [];
+    const stopSubscriptions: (() => void)[] = [];
+    for (const instance of instances.values()) {
+      const { alias, webcraft } = instance;
+      if (!webcraft) continue;
+      if (webcraft.directoryTransport !== 'websocket') {
+        polling.push(instance);
+        continue;
       }
-    }));
-    onChange();
-    setTimeout(() => void pollAll(onChange), pollInterval).unref();
+      const results = new Map<DirectoryFeed, FeedResult>();
+      const unreachable = { reachable: false };
+      const stop = subscribeWebcraftDirectory(webcraft, updates => {
+        for (const [feed, result] of updates) results.set(feed, result);
+        try {
+          applyResults(alias, results.get('server-status') ?? unreachable, results.get('server-info') ?? unreachable,
+            Array.from(updates.values()).some(result => result.data !== undefined));
+          onChange();
+        } catch (error) {
+          console.warn(`Could not refresh server information for ${alias}.`, error);
+        }
+      });
+      stopSubscriptions.push(stop);
+    }
+
+    let timer: NodeJS.Timeout | undefined;
+    let stopped = false;
+    async function pollAll() {
+      await Promise.all(polling.map(async instance => {
+        try {
+          await poll(instance);
+        } catch (error) {
+          console.warn(`Could not refresh server information for ${instance.alias}.`, error);
+        }
+      }));
+      if (stopped) return;
+      onChange();
+      timer = setTimeout(() => void pollAll(), pollInterval).unref();
+    }
+    if (polling.length) void pollAll();
+
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      for (const stop of stopSubscriptions) stop();
+    };
   }
 
   async function snapshot() {
@@ -164,15 +208,19 @@ export function createServerDirectory(
       const snapshot = snapshots.get(alias)!;
       if (webcraft && !snapshot.information) {
         const catalog = catalogs.get(alias);
+        const onlinePlayers = webcraft.onlinePlayersTransport && tabs.includes('players');
+        let items = false;
         if (catalog && tabs.includes('items')) {
           const manifest = await readFile(join(catalog, 'catalog.json'), 'utf8').then(text => fields(JSON.parse(text))).catch(() => undefined);
           const hasPublishedItems = manifest && (manifest.state === 'importing' || manifest.state === 'failed')
             && typeof manifest.total === 'number' && manifest.total > 0;
-          if (manifest?.state === 'ready' || hasPublishedItems) {
-            return { alias, tabs: ['items'], status: 'waiting', access: 'catalog' };
-          }
+          items = manifest?.state === 'ready' || !!hasPublishedItems;
         }
-        return { alias, tabs: [], status: 'waiting', access: 'pending' };
+        return {
+          alias, status: snapshot.status, lastSeenAt: snapshot.lastSeenAt,
+          tabs: tabs.filter(tab => tab === 'items' ? items : onlinePlayers),
+          access: items ? 'catalog' : onlinePlayers ? 'players' : 'pending',
+        };
       }
       const { playersOnline, uptimeSeconds, ...information } = snapshot.information ?? {};
       return {
@@ -193,5 +241,5 @@ export function createServerDirectory(
     response.end(JSON.stringify({ servers: await snapshot() }));
   }
 
-  return { start: (onChange: () => void) => void pollAll(onChange), serve, snapshot };
+  return { start, serve, snapshot };
 }

@@ -9,6 +9,14 @@ import './styles/fonts.css';
 const root = document.documentElement;
 const modifierKeys = new Set(['Shift', 'Control', 'Alt', 'Meta', 'AltGraph']);
 
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    void navigator.serviceWorker.register('/service-worker.js').catch(error => {
+      console.warn('Capycraft could not prepare the offline page.', error);
+    });
+  }, { once: true });
+}
+
 window.addEventListener('pointerdown', () => {
   root.setAttribute('data-pointer-input', '');
 }, { capture: true, passive: true });

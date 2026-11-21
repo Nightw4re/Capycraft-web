@@ -1,13 +1,8 @@
 import { usePreferences } from '../PreferencesProvider';
-import { buttonColors, dyeColors } from '../preferences';
+import { buttonColors, dyeColors, languageOptions } from '../preferences';
 import { HeaderPicker } from './HeaderPicker';
 import { HeaderSignIn } from './HeaderSignIn';
 import './header-controls.css';
-
-const languages = [
-  { value: 'en', label: 'English', lang: 'en', flag: 'gb' },
-  { value: 'cs', label: 'Čeština', lang: 'cs', flag: 'cz' },
-] as const;
 
 export function HeaderControls() {
   const { language, buttonColor, introAnimation, text, update } = usePreferences();
@@ -33,7 +28,7 @@ export function HeaderControls() {
         options={buttonColors.map(color => ({ value: color, label: text.colors[color], swatchColor: dyeColors[color] }))}
         onChange={buttonColor => update({ buttonColor })}
       />
-      <HeaderPicker label={text.language} value={language} options={languages} onChange={language => update({ language })} />
+      <HeaderPicker label={text.language} value={language} options={languageOptions} onChange={language => update({ language })} />
       <HeaderSignIn />
     </div>
   );

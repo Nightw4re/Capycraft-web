@@ -7,7 +7,7 @@
   pointer-events: none;
 }
 
-.notification-region p {
+.notification-region > :is(p, .catalog-language-message) {
   margin: 0;
   padding: 0.625rem 0.875rem;
   border: 1px solid var(--panel-border);
@@ -21,4 +21,39 @@
 
 .notification-region p[data-tone="error"] {
   border-inline-start-color: #f1b2a0;
+}
+
+.catalog-language-message {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0.5rem;
+  pointer-events: auto;
+}
+
+.catalog-language-message p {
+  margin: 0;
+}
+
+.catalog-language-message button {
+  inline-size: 2rem;
+  block-size: 2rem;
+  border: 1px solid var(--panel-border);
+  background: var(--button-fill);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.catalog-language-message label {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+
+.catalog-language-message input {
+  margin: 0;
+  accent-color: var(--panel-accent);
 }

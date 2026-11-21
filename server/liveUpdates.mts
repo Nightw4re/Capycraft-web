@@ -6,18 +6,18 @@ import { WebSocket, WebSocketServer } from 'ws';
 import layout from '../src/items/catalogLayout.json' with { type: 'json' };
 import { liveUpdatesPath, type ImportStatus, type LiveUpdate } from '../src/liveUpdates.mts';
 import type { ServerSummary } from '../src/serverDirectoryTypes.ts';
+import type { createOnlinePlayers } from './onlinePlayers.mts';
+
+function send(client: WebSocket, message: string) {
+  if (client.readyState !== WebSocket.OPEN) return;
+  if (client.bufferedAmount > 1024 * 1024) client.terminate();
+  else client.send(message);
+}
 
 function createFeed(read: () => Promise<LiveUpdate>) {
-  const clients = new Set<WebSocket>();
-  let lastMessage: string | undefined;
+  const clients = new Map<WebSocket, string | undefined>();
   let reading = false;
   let pending = false;
-
-  function send(client: WebSocket, message: string) {
-    if (client.readyState !== WebSocket.OPEN) return;
-    if (client.bufferedAmount > 1024 * 1024) client.terminate();
-    else client.send(message);
-  }
 
   async function refresh() {
     pending = true;
@@ -27,10 +27,13 @@ function createFeed(read: () => Promise<LiveUpdate>) {
       while (pending) {
         pending = false;
         try {
+          const subscribers = Array.from(clients.keys());
           const message = JSON.stringify(await read());
-          if (message === lastMessage) continue;
-          lastMessage = message;
-          for (const client of clients) send(client, message);
+          for (const client of subscribers) {
+            if (!clients.has(client) || clients.get(client) === message) continue;
+            clients.set(client, message);
+            send(client, message);
+          }
         } catch (error) {
           console.warn('Could not update live status.', error);
         }
@@ -43,8 +46,7 @@ function createFeed(read: () => Promise<LiveUpdate>) {
   return {
     refresh,
     subscribe(client: WebSocket) {
-      clients.add(client);
-      if (lastMessage !== undefined) send(client, lastMessage);
+      clients.set(client, undefined);
       void refresh();
       return () => { clients.delete(client); };
     },
@@ -72,7 +74,9 @@ function readStatus(text: string | undefined): ImportStatus | null {
   return status;
 }
 
-export function attachLiveUpdates(api: Server, snapshot: () => Promise<ServerSummary[]>, catalogs: ReadonlyMap<string, string>) {
+export function attachLiveUpdates(api: Server, snapshot: () => Promise<ServerSummary[]>, catalogs: ReadonlyMap<string, string>,
+  onlinePlayers: ReturnType<typeof createOnlinePlayers>,
+) {
   const sockets = new WebSocketServer({ noServer: true, maxPayload: 256 });
   const directory = createFeed(async () => ({ type: 'servers', servers: await snapshot() }));
   const stopWatching: (() => void)[] = [];
@@ -126,14 +130,25 @@ export function attachLiveUpdates(api: Server, snapshot: () => Promise<ServerSum
     client.on('error', () => client.terminate());
     const unsubscribeDirectory = directory.subscribe(client);
     let unsubscribeCatalog: (() => void) | undefined;
+    let unsubscribePlayers: (() => void) | undefined;
     client.on('message', (message, binary) => {
       if (binary) return;
       try {
         const data: unknown = JSON.parse(message.toString());
-        if (!data || typeof data !== 'object' || !('server' in data)) return;
-        if (data.server !== null && (typeof data.server !== 'string' || !feeds.has(data.server))) return;
-        unsubscribeCatalog?.();
-        unsubscribeCatalog = typeof data.server === 'string' ? feeds.get(data.server)?.subscribe(client) : undefined;
+        if (!data || typeof data !== 'object') return;
+        if ('server' in data && (data.server === null || (typeof data.server === 'string' && feeds.has(data.server)))) {
+          unsubscribeCatalog?.();
+          unsubscribeCatalog = typeof data.server === 'string' ? feeds.get(data.server)?.subscribe(client) : undefined;
+        }
+        if ('players' in data && 'subscription' in data && typeof data.subscription === 'number'
+          && Number.isSafeInteger(data.subscription) && (data.players === null || typeof data.players === 'string')) {
+          const { players: server, subscription } = data;
+          unsubscribePlayers?.();
+          unsubscribePlayers = typeof server === 'string' ? onlinePlayers.subscribe(server, roster => {
+            const update: LiveUpdate = { type: 'players', server, subscription, roster };
+            send(client, JSON.stringify(update));
+          }) : undefined;
+        }
       } catch {
         client.close(1007);
       }
@@ -142,6 +157,7 @@ export function attachLiveUpdates(api: Server, snapshot: () => Promise<ServerSum
       alive.delete(client);
       unsubscribeDirectory();
       unsubscribeCatalog?.();
+      unsubscribePlayers?.();
     });
   });
   const heartbeat = setInterval(() => {

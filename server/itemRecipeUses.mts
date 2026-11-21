@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { gunzip } from 'node:zlib';
 import { defaultAlias } from '../src/minecraftServers.mjs';
-import { hasCatalogDatabase, readCatalogAsset } from './catalogAssets.mts';
+import { catalogPublishedAt, catalogPublishedAtHeader, hasCatalogDatabase, readCatalogAsset } from './catalogAssets.mts';
+import { indexFluidRecipeUses } from './fluidRecipeUses.mts';
 import { addRecipeUses, createRecipeUsesIndex, recipeUsesIndexFile, type RecipeUsesIndex } from './recipeUsesIndex.mjs';
 import { readStoredRecipeUses, type StoredRecipeUses } from './recipeUsesStore.mts';
 
@@ -16,8 +17,9 @@ const itemId = /^[a-z0-9_.-]+:[a-z0-9_./-]+$/;
 const responseCacheBytes = 8 * 1024 * 1024;
 const responseCacheEntries = 64;
 const decompress = promisify(gunzip);
+const recipeCacheControl = 'public, max-age=1800, s-maxage=1800';
 
-type Manifest = { revision: string; previousRevision?: string; state: string; search: string };
+type Manifest = { revision: string; previousRevision?: string; publishedAt?: number; state: string; search: string };
 
 function acceptsGzip(header = '') {
   let wildcard = false;
@@ -81,6 +83,8 @@ async function loadIndex(root: string, search: string) {
 
 export function createServerItemRecipeUses(directories: ReadonlyMap<string, string>) {
   const cache = new Map<string, Promise<RecipeUsesIndex>>();
+  const fluids = new Map<string, ReturnType<typeof indexFluidRecipeUses>>();
+  let fluidBuildQueue = Promise.resolve();
   const responses = new Map<string, StoredRecipeUses>();
   let cachedBytes = 0;
 
@@ -109,8 +113,28 @@ export function createServerItemRecipeUses(directories: ReadonlyMap<string, stri
         response.writeHead(404).end(JSON.stringify({ error: 'recipe_uses_unavailable' }));
         return;
       }
+      const publishedAt = await catalogPublishedAt(root, manifest);
+      if (publishedAt) response.setHeader(catalogPublishedAtHeader, publishedAt);
 
       const key = `${server}:${revision}:${manifest.search}`;
+      if (url.searchParams.get('kind') === 'fluid') {
+        let index = fluids.get(key);
+        if (!index) {
+          const pending = fluidBuildQueue.then(() => indexFluidRecipeUses(revisionRoot)).catch(error => {
+            if (fluids.get(key) === pending) fluids.delete(key);
+            throw error;
+          });
+          fluidBuildQueue = pending.then(() => undefined, () => undefined);
+          index = pending;
+        }
+        fluids.delete(key);
+        fluids.set(key, index);
+        if (fluids.size > directories.size * 2) fluids.delete(fluids.keys().next().value!);
+        const recipes = [...((await index).get(id)?.values() ?? [])].sort((a, b) => a.id.localeCompare(b.id));
+        response.setHeader('Cache-Control', recipeCacheControl);
+        response.end(JSON.stringify({ fluidUses: { fluidId: id, recipes } }));
+        return;
+      }
       const responseKey = `${key}:${id}`;
       const cached = responses.get(responseKey);
       const stored = cached ?? await readStoredRecipeUses(revisionRoot, id);
@@ -131,7 +155,7 @@ export function createServerItemRecipeUses(directories: ReadonlyMap<string, stri
         }
         const gzip = stored.gzip && acceptsGzip(request.headers['accept-encoding']);
         const bytes = stored.gzip && !gzip ? await decompress(stored.bytes) : stored.bytes;
-        response.setHeader('Cache-Control', 'public, max-age=300');
+        response.setHeader('Cache-Control', recipeCacheControl);
         response.setHeader('Vary', 'Accept-Encoding');
         if (gzip) response.setHeader('Content-Encoding', 'gzip');
         response.end(bytes);
@@ -152,7 +176,7 @@ export function createServerItemRecipeUses(directories: ReadonlyMap<string, stri
       const uses = await index;
       const recipes = (uses.ingredients[id] ?? []).map(position => uses.recipes[position]).filter(Boolean)
         .sort((a, b) => String(a.id ?? '').localeCompare(String(b.id ?? '')));
-      response.setHeader('Cache-Control', 'public, max-age=300');
+      response.setHeader('Cache-Control', recipeCacheControl);
       response.end(JSON.stringify({ recipes }));
     } catch (error) {
       const missing = error instanceof Error && 'code' in error && error.code === 'ENOENT';

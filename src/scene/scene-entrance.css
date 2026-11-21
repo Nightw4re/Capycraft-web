@@ -23,6 +23,10 @@
   color-scheme: dark;
 }
 
+.scene-content[data-page="home"] {
+  scroll-padding-block-end: 0;
+}
+
 .scene-panels {
   position: relative;
   z-index: 1;

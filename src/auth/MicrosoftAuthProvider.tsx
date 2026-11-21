@@ -23,7 +23,7 @@ async function createMicrosoftClient(clientId: string) {
     auth: {
       clientId,
       authority: 'https://login.microsoftonline.com/consumers',
-      redirectUri: new URL('./auth-redirect.html', document.baseURI).href,
+      redirectUri: new URL('/auth-redirect.html', window.location.origin).href,
     },
     cache: { cacheLocation: BrowserCacheLocation.SessionStorage },
   });

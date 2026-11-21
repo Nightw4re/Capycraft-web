@@ -12,6 +12,7 @@ export type ServerInformation = {
   uptimeSeconds?: number;
   totalUptimeSeconds?: number;
   worldAgeDays?: number;
+  worldAgeMinutes?: number;
   modpack?: { name?: string; version?: string };
 };
 
@@ -19,6 +20,6 @@ export type ServerSummary = ServerInformation & {
   alias: string;
   tabs: readonly ServerPage[];
   status: ServerStatus;
-  access?: 'pending' | 'catalog';
+  access?: 'pending' | 'catalog' | 'players';
   lastSeenAt?: number;
 };

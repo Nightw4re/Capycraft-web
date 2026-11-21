@@ -2,19 +2,17 @@ import type { Meta, StoryObj } from '@storybook/react-vite';
 import { WinterScene } from './WinterScene';
 
 const meta = {
-  title: 'Zimní scéna/Celá scéna',
+  title: 'Winter Scene/Full Scene',
   component: WinterScene,
 } satisfies Meta<typeof WinterScene>;
 
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const Animovana: Story = {
-  name: 'Animovaná',
+export const Animated: Story = {
   args: { animate: true },
 };
 
-export const Staticka: Story = {
-  name: 'Statická',
+export const Static: Story = {
   args: { animate: false },
 };

@@ -2,18 +2,23 @@ import type { Meta, StoryObj } from '@storybook/react-vite';
 import { InfoPanel } from './InfoPanel';
 
 const meta = {
-  title: 'Rozložení/Informační blok',
+  title: 'Layout/Info Panel',
   component: InfoPanel,
   parameters: { layout: 'padded' },
   args: {
-    title: 'O serveru',
-    children: <p>Capycraft je Minecraft server.</p>,
+    title: 'About the server',
+    children: <p>Capycraft is a Minecraft server.</p>,
   },
 } satisfies Meta<typeof InfoPanel>;
 
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const Vychozi: Story = {
-  name: 'Výchozí',
+export const Default: Story = {
+  render: (args, { globals }) => {
+    if (globals.language === 'cs') {
+      return <InfoPanel {...args} title="O serveru"><p>Capycraft je český Minecraft server.</p></InfoPanel>;
+    }
+    return <InfoPanel {...args} />;
+  },
 };

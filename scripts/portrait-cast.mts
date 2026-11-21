@@ -3,6 +3,7 @@ import { basename } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
+import { downloadMinecraftSkin } from '../server/minecraftSkin.mts';
 import { portraitCast } from '../src/portrait/portraitCast';
 import type { PortraitPlayer } from '../src/portrait/portraitScene';
 import type { PortraitSkin } from '../src/portrait/skinGeometry';
@@ -34,32 +35,10 @@ export async function readSkin({ name, skin, model }: PortraitPlayer): Promise<P
 }
 
 async function downloadSkin(name: string): Promise<PortraitPlayer> {
-  const profile = await fetchMinecraft(`https://api.mojang.com/users/profiles/minecraft/${name}`);
-  if (!profile.ok || profile.status === 204) throw new Error(`Minecraft profile lookup failed for ${name} (${profile.status})`);
-  const { id } = await profile.json() as { id?: string };
-  if (typeof id !== 'string' || !/^[a-f0-9]{32}$/i.test(id)) throw new Error(`Invalid Minecraft profile for ${name}`);
-
-  const session = await fetchMinecraft(`https://sessionserver.mojang.com/session/minecraft/profile/${id}`);
-  if (!session.ok || session.status === 204) throw new Error(`Minecraft session lookup failed for ${name} (${session.status})`);
-  const { properties } = await session.json() as { properties?: { name: string; value: string }[] };
-  const texture = properties?.find(property => property.name === 'textures')?.value;
-  if (!texture) throw new Error(`Minecraft did not return skin information for ${name}`);
-
-  const { textures } = JSON.parse(Buffer.from(texture, 'base64').toString('utf8')) as {
-    textures?: { SKIN?: { url: string; metadata?: { model?: string } } };
-  };
-  const skin = textures?.SKIN;
-  const hash = skin?.url.match(/^https?:\/\/textures\.minecraft\.net\/texture\/([a-f0-9]{32,64})$/i)?.[1];
-  if (!hash) throw new Error(`No custom Java skin found for ${name}`);
-  const image = await fetchMinecraft(`https://textures.minecraft.net/texture/${hash}`);
-  if (!image.ok) throw new Error(`Could not download the Minecraft skin for ${name} (${image.status})`);
-  const bytes = Buffer.from(await image.arrayBuffer());
-  const { format, width, height } = await sharp(bytes).metadata();
-  if (format !== 'png' || width !== 64 || (height !== 32 && height !== 64)) throw new Error(`Invalid Java skin for ${name}`);
-
+  const { bytes, hash, model } = await downloadMinecraftSkin(name, fetchMinecraft);
   const destination = new URL(`${name.toLowerCase()}-${hash.slice(0, 12)}.png`, assets);
   await writeFile(destination, bytes);
-  return { name, model: skin?.metadata?.model === 'slim' ? 'slim' : 'classic', skin: destination };
+  return { name, model, skin: destination };
 }
 
 export async function resolvePortraitCast(refresh: boolean): Promise<PortraitPlayer[]> {

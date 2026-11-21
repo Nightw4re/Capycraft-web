@@ -7,7 +7,7 @@ export const recipeStations = [
 
 export type RecipeIngredient = { items: string[]; tags: string[]; custom: boolean; truncated: boolean };
 
-export type MachineIngredient = { id: string; kind: 'item' | 'fluid'; amount: number };
+export type MachineIngredient = { id: string; kind: 'item' | 'fluid'; amount: number; icon?: string; name?: string };
 type RecipeBounds = { x: number; y: number; width: number; height: number };
 export type MachineRecipeSlot = {
   role: 'input' | 'output' | 'catalyst';
@@ -21,6 +21,7 @@ export type MachineRecipe = {
   category: string;
   title: string;
   frame: RecipeBounds;
+  slotSize: number;
   slots: MachineRecipeSlot[];
 };
 
@@ -85,17 +86,19 @@ function readMachineSlot(value: unknown): MachineRecipeSlot[] {
     bounds: coordinate(x) && coordinate(y) && dimension(width) && dimension(height) ? { x, y, width, height } : undefined,
     name: typeof name === 'string' && name.trim() ? name : undefined,
     alternatives: alternatives.flatMap((value): MachineIngredient[] => {
-      const { id, kind, count, amountMb } = record(value);
+      const { id, kind, count, amountMb, icon, name } = record(value);
       const amount = kind === 'item' ? count : amountMb;
       return (kind === 'item' || kind === 'fluid') && isItemId(id)
-        && typeof amount === 'number' && Number.isSafeInteger(amount) && amount > 0 ? [{ id, kind, amount }] : [];
+        && typeof amount === 'number' && Number.isSafeInteger(amount) && amount > 0
+        ? [{ id, kind, amount, icon: kind === 'fluid' && typeof icon === 'string' ? icon : undefined,
+          name: kind === 'fluid' && typeof name === 'string' && name.trim() ? name : undefined }] : [];
     }),
     otherIngredients: otherIngredients === true,
     alternativesTruncated: alternativesTruncated === true,
   }];
 }
 
-function readMachineRecipes(value: unknown) {
+function readMachineRecipes(value: unknown, uses = false) {
   const { itemId, fluidId, recipes } = record(value);
   const resultKind = isItemId(fluidId) ? 'fluid' : 'item';
   const resultId = fluidId ?? itemId;
@@ -108,20 +111,24 @@ function readMachineRecipes(value: unknown) {
     if (!isItemId(id) || !isItemId(category) || typeof title !== 'string' || !title.trim()
       || !dimension(width) || !dimension(height) || !Array.isArray(rawSlots)) continue;
     const slots = rawSlots.flatMap(readMachineSlot);
-    if (!slots.some(slot => slot.role === 'output'
+    if (!slots.some(slot => (uses ? slot.role !== 'output' : slot.role === 'output')
       && slot.alternatives.some(ingredient => ingredient.kind === resultKind && ingredient.id === resultId))) continue;
-    let left = 0;
-    let top = 0;
-    let right = width;
-    let bottom = height;
-    for (const { bounds } of slots) {
+    let left = Infinity;
+    let top = Infinity;
+    let right = -Infinity;
+    let bottom = -Infinity;
+    let slotSize = Infinity;
+    for (const { bounds, alternatives } of slots) {
       if (!bounds) continue;
       left = Math.min(left, bounds.x);
       top = Math.min(top, bounds.y);
       right = Math.max(right, bounds.x + bounds.width);
       bottom = Math.max(bottom, bounds.y + bounds.height);
+      if (alternatives[0]?.kind === 'item') slotSize = Math.min(slotSize, bounds.width, bounds.height);
     }
-    const machine = { category, title, slots, frame: { x: left, y: top, width: right - left, height: bottom - top } };
+    const frame = Number.isFinite(left) ? { x: left, y: top, width: right - left, height: bottom - top }
+      : { x: 0, y: 0, width, height };
+    const machine = { category, title, slots, frame, slotSize: Number.isFinite(slotSize) ? slotSize : 16 };
     const stationIds = itemIds(stations);
     for (const station of stationIds.length ? stationIds : [category]) entries.push({ id, station, machine });
     rendered.add(id);
@@ -130,7 +137,8 @@ function readMachineRecipes(value: unknown) {
 }
 
 export function readRecipeFeed(value: unknown): RecipeEntry[] {
-  const { itemId, recipes, machineRecipes } = record(value);
+  const { itemId, recipes, machineRecipes, fluidUses } = record(value);
+  if (fluidUses) return readMachineRecipes(fluidUses, true).entries;
   const { entries, rendered } = readMachineRecipes(machineRecipes);
   const world = Array.isArray(recipes) ? recipes : [];
   const infusion = 'mysticalagriculture:infusion';

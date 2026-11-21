@@ -1,4 +1,7 @@
 import type { CSSProperties } from 'react';
+import { minecraftFormattingCode } from '../minecraftText.mts';
+
+export { plainMinecraftText } from '../minecraftText.mts';
 
 const legacyColors: Record<string, string> = {
   '0': '#000000', '1': '#0000aa', '2': '#00aa00', '3': '#00aaaa',
@@ -70,7 +73,7 @@ export function parseMinecraftMotd(motd: string): MotdPart[] {
     });
   };
 
-  for (const match of motd.matchAll(/\u00a7(x(?:\u00a7[0-9a-f]){6}|#[0-9a-f]{6}|[0-9a-fk-or])/gi)) {
+  for (const match of motd.matchAll(minecraftFormattingCode)) {
     append(match.index);
     start = match.index + match[0].length;
     const code = match[1].toLowerCase();

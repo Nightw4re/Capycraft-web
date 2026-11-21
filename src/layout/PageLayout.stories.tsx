@@ -3,15 +3,15 @@ import { InfoPanel } from './InfoPanel';
 import { PageLayout } from './PageLayout';
 
 const meta = {
-  title: 'Rozložení/Stránka',
+  title: 'Layout/Page',
   component: PageLayout,
   decorators: [(Story) => <div style={{ minHeight: '100svh', background: '#221a35' }}><Story /></div>],
   argTypes: { children: { control: false } },
   args: {
-    title: 'Informace',
+    title: 'Information',
     children: [
-      <InfoPanel key="server" title="O serveru"><p>Capycraft je Minecraft server.</p></InfoPanel>,
-      <InfoPanel key="overview" title="Hráčský přehled"><p>Hráčský přehled připravujeme.</p></InfoPanel>,
+      <InfoPanel key="server" title="About the server"><p>Capycraft is a Minecraft server.</p></InfoPanel>,
+      <InfoPanel key="overview" title="Player overview"><p>The player overview is in development.</p></InfoPanel>,
     ],
   },
 } satisfies Meta<typeof PageLayout>;
@@ -19,12 +19,10 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const Sloupec: Story = {
-  name: 'Jeden sloupec',
+export const SingleColumn: Story = {
   args: { layout: 'stack' },
 };
 
-export const Mrizka: Story = {
-  name: 'Responzivní mřížka',
+export const ResponsiveGrid: Story = {
   args: { layout: 'grid' },
 };

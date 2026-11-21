@@ -2,19 +2,28 @@ import { useEffect, useRef, useState } from 'react';
 import animated from '../../assets/nugwa-animated.png?no-inline';
 import still from '../../assets/nugwa-seated.png?no-inline';
 import { usePreferences } from '../PreferencesProvider';
+import type { PortraitArrival } from './portraitAnimation';
 import { portraitCast } from './portraitCast';
 import { stageHeight, stageWidth } from './portraitScene';
-import { playPortrait } from './playPortrait';
+import { loadVisitorNames, playPortrait } from './playPortrait';
 import './player-portrait.css';
 
-export function NugwaPortrait() {
+const bundledNames = portraitCast.map(({ name }) => name);
+
+export function NugwaPortrait({ players, server, arrival }: {
+  players?: readonly string[];
+  server?: string;
+  arrival?: PortraitArrival;
+}) {
   const { text } = usePreferences();
   const stage = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const [mode, setMode] = useState<'still' | 'canvas' | 'image'>('still');
-  const label = mode === 'still'
-    ? text.portraitCharacter(portraitCast[0].name)
-    : text.portraitPlayers(portraitCast.map(({ name }) => name).join(', '));
+  const [playedNames, setPlayedNames] = useState(bundledNames);
+  const names = mode === 'canvas' ? playedNames : bundledNames;
+  const label = mode === 'still' || names.length === 1
+    ? text.portraitCharacter(names[0])
+    : text.portraitPlayers(names.join(', '));
 
   useEffect(() => {
     const container = stage.current;
@@ -26,10 +35,8 @@ export function NugwaPortrait() {
 
     const syncMotion = () => {
       playback?.abort();
-      if (!motion.matches) {
-        setMode('still');
-        return;
-      }
+      setMode('still');
+      if (!motion.matches) return;
 
       const controller = new AbortController();
       playback = controller;
@@ -39,11 +46,15 @@ export function NugwaPortrait() {
         setMode('image');
       }
 
-      void playPortrait(container, element, controller.signal, showImage)
-        .then(() => {
-          if (!controller.signal.aborted) setMode('canvas');
-        })
-        .catch(showImage);
+      const start = async () => {
+        const names = players ?? await loadVisitorNames(server, controller.signal);
+        if (controller.signal.aborted) return;
+        const loaded = await playPortrait(container, element, names, arrival, controller.signal, showImage);
+        if (!loaded || controller.signal.aborted) return;
+        setPlayedNames(loaded);
+        setMode('canvas');
+      };
+      void start().catch(showImage);
     };
 
     syncMotion();
@@ -52,7 +63,7 @@ export function NugwaPortrait() {
       playback?.abort();
       motion.removeEventListener('change', syncMotion);
     };
-  }, []);
+  }, [players, server, arrival]);
 
   return (
     <div className="player-portrait" ref={stage} role="img" aria-label={label}>

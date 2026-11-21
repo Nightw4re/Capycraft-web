@@ -35,6 +35,10 @@ async function sceneImage(root: string, { name, quality }: typeof sceneImages[nu
   return { source, output, href: normalizePath(relative(root, output)) };
 }
 
+export async function sceneBackdropPath(root: string) {
+  return (await sceneImage(root, sceneImages[0])).output;
+}
+
 export function sceneWebp(root: string): Plugin {
   let images: Awaited<ReturnType<typeof sceneImage>>[] = [];
   const sources = new Set(sceneImages.map(({ name }) => normalizePath(resolve(root, `assets/${name}.png`))));
@@ -59,7 +63,7 @@ export function sceneWebp(root: string): Plugin {
     transformIndexHtml: {
       order: 'pre',
       handler(html) {
-        for (const { source, href } of images) html = html.replaceAll(`href="./${source}"`, `href="./${href}"`);
+        for (const { source, href } of images) html = html.replaceAll(`href="/${source}"`, `href="/${href}"`);
         return html;
       },
     },

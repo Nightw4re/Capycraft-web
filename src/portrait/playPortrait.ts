@@ -1,17 +1,26 @@
-import { createPortraitAnimation } from './portraitAnimation';
+import { createPortraitAnimation, distinctPlayerNames, type PortraitArrival } from './portraitAnimation';
 import { portraitCast } from './portraitCast';
-import type { PortraitPlayer } from './portraitScene';
 import { createPortraitRenderer } from './renderPortrait';
 import type { PortraitSkin } from './skinGeometry';
 
-const portraitFrames = createPortraitAnimation(portraitCast.map(player => player.name));
-const seatedFrame = portraitFrames[0].frame;
-let cycleDuration = 0;
-const timeline = portraitFrames.map(({ frame, duration }) => ({ frame, end: cycleDuration += duration }));
+export async function loadVisitorNames(server: string | undefined, signal: AbortSignal): Promise<string[]> {
+  const params = new URLSearchParams({ portrait: '1' });
+  if (server) params.set('server', server);
+  try {
+    const response = await fetch(`/api/players?${params}`, { signal });
+    if (!response.ok) return [];
+    const { players } = await response.json() as { players?: unknown };
+    return Array.isArray(players) ? players.filter(name => typeof name === 'string') : [];
+  } catch {
+    return [];
+  }
+}
 
 export async function playPortrait(
   stage: HTMLElement,
   canvas: HTMLCanvasElement,
+  players: readonly string[],
+  arrival: PortraitArrival | undefined,
   signal: AbortSignal,
   onError: () => void,
 ) {
@@ -23,19 +32,44 @@ export async function playPortrait(
   const textureContext = texture.getContext('2d');
   if (!textureContext) throw new Error('Canvas is unavailable');
 
-  const loadSkin = async ({ name, skin: source, model }: PortraitPlayer): Promise<[string, PortraitSkin]> => {
-    const skin = new Image();
-    skin.src = source.href;
-    await skin.decode();
-    const legacy = skin.naturalHeight === 32;
-    if (skin.naturalWidth !== 64 || (!legacy && skin.naturalHeight !== 64)) throw new Error(`Invalid Java skin for ${name}`);
-    textureContext.clearRect(0, 0, 64, 64);
-    textureContext.drawImage(skin, 0, 0);
-    return [name, { pixels: textureContext.getImageData(0, 0, 64, 64).data, model: legacy ? 'legacy' : model }];
+  const loadSkin = async (name: string): Promise<[string, PortraitSkin]> => {
+    const bundled = portraitCast.find(player => player.name.toLowerCase() === name.toLowerCase());
+    let source = bundled?.skin.href;
+    let model = bundled?.model;
+    let objectUrl: string | undefined;
+    if (!source) {
+      const response = await fetch(`/api/players?${new URLSearchParams({ skin: name })}`, { signal });
+      if (!response.ok) throw new Error(`Skin unavailable for ${name}`);
+      model = response.headers.get('X-Minecraft-Skin-Model') === 'slim' ? 'slim' : 'classic';
+      objectUrl = URL.createObjectURL(await response.blob());
+      source = objectUrl;
+    }
+    try {
+      const skin = new Image();
+      skin.src = source;
+      await skin.decode();
+      const legacy = skin.naturalHeight === 32;
+      if (skin.naturalWidth !== 64 || (!legacy && skin.naturalHeight !== 64)) throw new Error(`Invalid Java skin for ${name}`);
+      textureContext.clearRect(0, 0, 64, 64);
+      textureContext.drawImage(skin, 0, 0);
+      return [name, { pixels: textureContext.getImageData(0, 0, 64, 64).data, model: legacy ? 'legacy' : model ?? 'classic' }];
+    } finally {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    }
   };
 
-  const loaded = await Promise.all(portraitCast.map(loadSkin));
+  const attempts = await Promise.allSettled(distinctPlayerNames(players).map(loadSkin));
+  let loaded = attempts.flatMap(result => result.status === 'fulfilled' ? [result.value] : []);
   if (signal.aborted) return;
+  const useBundledCast = loaded.length === 0;
+  if (useBundledCast) loaded = await Promise.all(portraitCast.map(({ name }) => loadSkin(name)));
+  if (signal.aborted) return;
+
+  const names = loaded.map(([name]) => name);
+  const portraitFrames = createPortraitAnimation(names, arrival ?? (useBundledCast ? 'same' : 'next'));
+  const seatedFrame = portraitFrames[0].frame;
+  let cycleDuration = 0;
+  const timeline = portraitFrames.map(({ frame, duration }) => ({ frame, end: cycleDuration += duration }));
 
   const render = createPortraitRenderer(new Map(loaded));
   const raster = context.createImageData(canvas.width, canvas.height);
@@ -114,4 +148,5 @@ export async function playPortrait(
   window.addEventListener('blur', () => { focused = false; syncVisibility(); }, { signal });
   window.addEventListener('focus', () => { focused = true; syncVisibility(); }, { signal });
   syncVisibility();
+  return names;
 }

@@ -1,4 +1,12 @@
 export function searchText(text: string): string;
+export type TooltipTextSpan = Record<string, unknown> & { text: string };
+export type TooltipShortcut = { id: string; label: string };
+export function isTooltipShortcutId(value: unknown): value is string;
+export function readTooltipLines(payload: unknown): TooltipTextSpan[][] | undefined;
+export function readTooltipAlternatives(payload: unknown): (TooltipShortcut & { lines: TooltipTextSpan[][] })[];
+export function catalogSearchTerms(query: string): { items: string[]; mods: string[]; tags: string[]; tooltips: string[] };
+export function catalogSearchWithMod(query: string, mod: string): string;
+export function catalogModMatches(namespace: string, term: string): boolean;
 export function lookupSlot(id: string): number;
 export type ItemBar = { width: number; color: number };
 export function readItemBar(value: unknown): ItemBar | undefined;

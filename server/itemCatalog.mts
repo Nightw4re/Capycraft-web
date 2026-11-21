@@ -4,10 +4,17 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { basename, dirname, resolve } from 'node:path';
 import layout from '../src/items/catalogLayout.json' with { type: 'json' };
 import { defaultAlias } from '../src/minecraftServers.mjs';
-import { readCatalogAsset } from './catalogAssets.mts';
+import { catalogPublishedAt, catalogPublishedAtHeader, readCatalogAsset } from './catalogAssets.mts';
 
 export const catalogPrefix = '/item-catalog/';
 const catalogAsset = /^(?:revisions\/[a-f0-9]{64}\/)?(?:(?:icons|atlases)\/[a-f0-9]{64}\.(?:png|webp)|(?:details|pages|lookup|payloads)\/[a-f0-9]{64}\.json)$/;
+
+export function readCatalogResource(directory: string, path: string) {
+  const resource = resolve(directory, path);
+  if (path === 'catalog.json' || path === layout.statusFile) return readFile(resource);
+  const folder = dirname(resource);
+  return readCatalogAsset(dirname(folder), basename(folder), basename(resource));
+}
 
 export async function serveCatalog(directories: ReadonlyMap<string, string>, path: string, request: IncomingMessage, response: ServerResponse) {
   const scoped = /^servers\/([a-z0-9-]+)\/(.*)$/.exec(path);
@@ -25,12 +32,16 @@ export async function serveCatalog(directories: ReadonlyMap<string, string>, pat
     return;
   }
   try {
-    const resource = resolve(directory, path);
-    const folder = dirname(resource);
-    const data = manifest || status ? await readFile(resource)
-      : await readCatalogAsset(dirname(folder), basename(folder), basename(resource));
+    const data = await readCatalogResource(directory, path);
     response.setHeader('Cache-Control', manifest || status ? 'no-cache' : 'public, max-age=31536000, immutable');
     response.setHeader('Content-Type', path.endsWith('.json') ? 'application/json; charset=utf-8' : path.endsWith('.png') ? 'image/png' : 'image/webp');
+    if (manifest) {
+      const metadata = JSON.parse(data.toString('utf8'));
+      if (metadata?.state === 'ready' || (metadata && metadata.state === undefined)) {
+        const publishedAt = await catalogPublishedAt(directory, metadata);
+        if (publishedAt) response.setHeader(catalogPublishedAtHeader, publishedAt);
+      }
+    }
     if (manifest || status) {
       const tag = `"${createHash('sha256').update(data).digest('hex')}"`;
       response.setHeader('ETag', tag);

@@ -1,39 +1,18 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import type { TooltipModes } from '../preferences';
 import { usePreferences } from '../PreferencesProvider';
+import { parseMinecraftMotd } from '../layout/minecraftMotd';
 import { loadItemDetails, loadItemPayload, type CatalogItem, type ItemPayloads } from './catalogData';
+import { readTooltipAlternatives, readTooltipLines, type TooltipShortcut, type TooltipTextSpan } from './catalogIndex.mjs';
 import { ItemLoadingHint } from './ItemLoadingHint';
-import type { TooltipModes, TooltipShortcut } from './ItemTooltipTools';
 
-type TextSpan = Record<string, unknown> & { text: string };
-type TooltipAlternative = TooltipShortcut & { lines: TextSpan[][] };
 type TooltipContentProps = { item: CatalogItem; modes: TooltipModes; data: ReturnType<typeof useItemTooltip> };
 const shortcutCache = new Map<string, TooltipShortcut[]>();
 const shortcutRequestLimit = 6;
 
-function isTextSpan(span: unknown): span is TextSpan {
-  return !!span && typeof span === 'object' && 'text' in span && typeof span.text === 'string';
-}
-
-function readTooltipLines(payload: unknown) {
-  if (!payload || typeof payload !== 'object' || !('lines' in payload) || !Array.isArray(payload.lines)) return;
-  const lines = payload.lines.filter(Array.isArray).map(line => line.filter(isTextSpan));
-  if (lines.some(line => line.some(span => span.text.trim()))) return lines;
-}
-
-function readAlternatives(payload: unknown): TooltipAlternative[] {
-  if (!payload || typeof payload !== 'object' || !('alternatives' in payload) || !Array.isArray(payload.alternatives)) return [];
-  const alternatives = new Map<string, TooltipAlternative>();
-  for (const entry of payload.alternatives) {
-    if (!entry || typeof entry !== 'object') continue;
-    const { keys, label } = entry;
-    if (!Array.isArray(keys) || !keys.length || !keys.every(key => typeof key === 'string' && /^key\.[a-z0-9_.-]+$/.test(key))
-        || typeof label !== 'string' || !label.trim()) continue;
-    const lines = readTooltipLines(entry);
-    if (!lines) continue;
-    const id = [...new Set(keys)].sort().join('+');
-    if (!alternatives.has(id)) alternatives.set(id, { id, label, lines });
-  }
-  return [...alternatives.values()];
+export function MinecraftItemText({ text }: { text: string }) {
+  if (!text.includes('\u00a7')) return text;
+  return parseMinecraftMotd(text).map(part => <span key={part.start} style={part.style}>{part.text}</span>);
 }
 
 export async function loadPageTooltipShortcuts(items: readonly CatalogItem[], signal: AbortSignal) {
@@ -56,7 +35,7 @@ export async function loadPageTooltipShortcuts(items: readonly CatalogItem[], si
         let request = pendingPayloads.get(url);
         if (!request) {
           request = loadItemPayload(url, signal).then(payload => {
-            const shortcuts = readAlternatives(payload).map(({ id, label }) => ({ id, label }));
+            const shortcuts = readTooltipAlternatives(payload).map(({ id, label }) => ({ id, label }));
             shortcutCache.set(url, shortcuts);
             return shortcuts;
           });
@@ -87,7 +66,7 @@ function readComponents(stack: unknown) {
   if (components && typeof components === 'object' && !Array.isArray(components)) return components as Record<string, unknown>;
 }
 
-function spanStyle(span: TextSpan): CSSProperties {
+function spanStyle(span: TooltipTextSpan): CSSProperties {
   const { color } = span;
   const decoration = [];
   if (span.underlined === true) decoration.push('underline');
@@ -132,7 +111,7 @@ export function useItemTooltip(item: CatalogItem | undefined, payloads?: ItemPay
   const sources = payloads === undefined && item?.detail ? (loaded?.item === item ? loaded.sources : undefined) : payloads ?? null;
   const payload = usePayload(sources?.tooltip);
   const lines = useMemo(() => readTooltipLines(payload), [payload]);
-  const shortcuts = useMemo(() => readAlternatives(payload), [payload]);
+  const shortcuts = useMemo(() => readTooltipAlternatives(payload), [payload]);
   return { lines, shortcuts, stackUrl: sources?.stack, loading: sources === undefined || payload === undefined };
 }
 
@@ -150,10 +129,12 @@ function ItemTooltipContent({ item, modes, data }: TooltipContentProps) {
     {lines ? <div className="item-tooltip-lines">
       {lines.map((line, index) => (
         <div key={index}>{line.length === 0 ? '\u00a0' : line.map((span, position) => (
-          <span key={position} style={spanStyle(span)} data-obfuscated={span.obfuscated === true || undefined}>{span.text}</span>
+          <span key={position} style={spanStyle(span)} data-obfuscated={span.obfuscated === true || undefined}>
+            <MinecraftItemText text={span.text} />
+          </span>
         ))}</div>
       ))}
-    </div> : <strong>{item.name}</strong>}
+    </div> : <strong><MinecraftItemText text={item.name} /></strong>}
     {item.fluidId && <div>{text.itemFluid}</div>}
     {loading && !item.fluidId && <ItemLoadingHint label={text.itemTooltipLoading} />}
     {modes.advanced && <div className="item-tooltip-meta">

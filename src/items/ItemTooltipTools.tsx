@@ -1,8 +1,7 @@
 import type { CSSProperties } from 'react';
+import type { TooltipModes } from '../preferences';
 import { usePreferences } from '../PreferencesProvider';
-
-export type TooltipShortcut = { id: string; label: string };
-export type TooltipModes = { advanced: true; shortcut?: undefined } | { advanced: false; shortcut?: string };
+import type { TooltipShortcut } from './catalogIndex.mjs';
 
 const shortcutColors = new Map([
   ['key.keyboard.left.control', '#5edcff'],
@@ -39,7 +38,7 @@ export function ItemTooltipTools({ modes, onChange, shortcuts = [] }: {
         onClick={() => onChange({ advanced: !modes.advanced })}>F3 + H</button>
       {shortcuts.map(({ id, label }) => (
         <button key={id} type="button" className="item-action item-tooltip-alternative"
-          aria-pressed={modes.shortcut === id} style={shortcutStyle(id)}
+          aria-pressed={modes.shortcut === id} title={label} style={shortcutStyle(id)}
           onClick={() => onChange({ advanced: false, shortcut: modes.shortcut === id ? undefined : id })}>{label}</button>
       ))}
     </div>

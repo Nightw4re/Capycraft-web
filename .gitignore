@@ -1,6 +1,7 @@
 /node_modules/
 /dist/
 /storybook-static/
+/debug-storybook.log
 /.env
 /.env.*
 !/.env.example

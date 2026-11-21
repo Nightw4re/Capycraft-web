@@ -153,7 +153,39 @@
 }
 
 .home-highlight-rotation {
+  position: relative;
   margin-inline-start: auto;
+}
+
+.home-highlight-controls .home-highlight-progress {
+  position: absolute;
+  inset: 0;
+  inline-size: 100%;
+  block-size: 100%;
+  fill: none;
+  stroke: var(--panel-accent);
+  stroke-width: 2;
+  pointer-events: none;
+}
+
+.home-highlight-progress-track {
+  opacity: 0.2;
+}
+
+.home-highlight-progress-fill {
+  stroke-dasharray: 100;
+  stroke-dashoffset: 100;
+  animation: home-highlight-countdown 20s linear forwards paused;
+}
+
+.home-highlight-rotation[data-rotating="true"] .home-highlight-progress-fill {
+  animation-play-state: running;
+}
+
+@keyframes home-highlight-countdown {
+  to {
+    stroke-dashoffset: 0;
+  }
 }
 
 .home-highlight-controls button:hover {

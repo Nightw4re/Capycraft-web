@@ -1,5 +1,9 @@
 import layout from './catalogLayout.json';
-import { lookupSlot, readItemBar, searchText, type ItemBar } from './catalogIndex.mjs';
+import {
+  catalogModMatches, catalogSearchTerms, catalogSearchWithMod, isTooltipShortcutId, lookupSlot, readItemBar, searchText,
+  type ItemBar, type TooltipShortcut,
+} from './catalogIndex.mjs';
+import { isItemId } from './itemRoutes.mts';
 import { catalogSubdirectory } from '../minecraftServers.mjs';
 import type { Language } from '../preferences';
 
@@ -16,22 +20,27 @@ export type CatalogItem = {
   detail?: string;
   sprite?: ItemSprite;
   bar?: ItemBar;
+  tooltipShortcutIds?: readonly string[];
 };
 
 type CatalogRecord = Omit<CatalogItem, 'sprite'> & { sprite?: number };
 
-type PageOptions = { language: Language; page: number; query: string; mod: string };
+type PageOptions = { language: Language; page: number; query: string };
 type CatalogPage = { items: CatalogItem[]; total: number };
 
 export type Catalog = {
   key?: string;
   revision?: string;
+  publishedAt?: number;
   progress?: { loaded: number; expected: number; failed: boolean };
   mods: readonly string[];
+  tooltipShortcuts?: readonly TooltipShortcut[];
   getPage(options: PageOptions, signal: AbortSignal): Promise<CatalogPage>;
   getItem(id: string, signal: AbortSignal): Promise<CatalogItem | undefined>;
   getItems(ids: ReadonlySet<string>, signal: AbortSignal): Promise<ReadonlyMap<string, CatalogItem>>;
-  getRecipeUses?(id: string, signal: AbortSignal): Promise<unknown>;
+  getRecipeItemIcons?(ids: ReadonlySet<string>, signal: AbortSignal): Promise<ReadonlyMap<string, string>>;
+  getIcon?(name: string): string | undefined;
+  getRecipeUses?(id: string, signal: AbortSignal, kind?: 'fluid'): Promise<{ feed: unknown; publishedAt?: number }>;
 };
 
 export type ItemPayloads = { tooltip?: string; stack?: string };
@@ -63,13 +72,9 @@ const directory = `${import.meta.env.BASE_URL}item-catalog/`;
 const catalogDirectory = (server: string) => directory + catalogSubdirectory(server);
 const resource = /^[a-f0-9]{64}$/;
 const imageName = /^[a-f0-9]{64}\.(?:webp|png)$/;
-const identifier = /^[a-z0-9_.-]+:[a-z0-9_./-]+$/;
-
 const itemDetails = new Map<string, Promise<ItemDetails>>();
 
-export function isItemId(value: unknown): value is string {
-  return typeof value === 'string' && identifier.test(value);
-}
+export { isItemId };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -77,6 +82,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isResource(value: unknown): value is string {
   return typeof value === 'string' && resource.test(value);
+}
+
+function isTooltipShortcut(value: unknown): value is TooltipShortcut {
+  return isRecord(value) && isTooltipShortcutId(value.id) && typeof value.label === 'string' && !!value.label.trim();
 }
 
 function isPayloads(value: unknown): value is ItemPayloads {
@@ -98,6 +107,8 @@ function isCatalogItem(value: unknown, version: number, atlasCount: number): val
     && (value.fluidId === undefined || isItemId(value.fluidId))
     && (value.detail === undefined || isResource(value.detail))
     && (value.bar === undefined || readItemBar(value.bar) !== undefined)
+    && (value.tooltipShortcutIds === undefined || (Array.isArray(value.tooltipShortcutIds)
+      && value.tooltipShortcutIds.every(isTooltipShortcutId)))
     && (version === 1 || value.sprite === undefined || (typeof value.sprite === 'number'
       && Number.isSafeInteger(value.sprite) && value.sprite >= 0 && value.sprite < atlasCount * layout.pageSize
       && typeof value.icon === 'string'));
@@ -142,17 +153,21 @@ function legacyCatalog(items: CatalogItem[]): Catalog {
     item, mod: item.id.split(':')[0], search: searchText(`${item.name} ${item.id}`),
   }));
   const orders = new Map<Language, typeof index>();
+  const mods = [...new Set(index.map(entry => entry.mod))].sort();
   return {
-    mods: [...new Set(index.map(entry => entry.mod))].sort(),
-    async getPage({ language, page, mod, query }) {
+    mods,
+    async getPage({ language, page, query }) {
       let order = orders.get(language);
       if (!order) {
         const collator = new Intl.Collator(language, { numeric: true });
         order = [...index].sort((a, b) => collator.compare(a.item.name, b.item.name) || collator.compare(a.item.id, b.item.id));
         orders.set(language, order);
       }
-      const terms = searchText(query).trim().split(/\s+/).filter(Boolean);
-      const matches = order.filter(entry => (!mod || entry.mod === mod) && terms.every(term => entry.search.includes(term)));
+      const terms = catalogSearchTerms(query);
+      const mod = exactCatalogMod(mods, terms.mods);
+      const matches = terms.tags.length || terms.tooltips.length ? [] : order.filter(entry =>
+        (mod ? entry.mod === mod : terms.mods.every(term => catalogModMatches(entry.mod, term)))
+        && terms.items.every(term => entry.search.includes(term)));
       const first = page * layout.pageSize;
       return { total: matches.length, items: matches.slice(first, first + layout.pageSize).map(entry => entry.item) };
     },
@@ -168,35 +183,51 @@ function legacyCatalog(items: CatalogItem[]): Catalog {
   };
 }
 
+function exactCatalogMod(mods: readonly string[], terms: string[]) {
+  return terms.length === 1 ? mods.find(mod => searchText(mod) === terms[0]) : undefined;
+}
+
 async function readJson(url: string, signal: AbortSignal): Promise<unknown> {
   const response = await fetch(url, { signal });
   if (!response.ok) throw new Error(`Catalog data request failed with HTTP ${response.status}.`);
   return response.json();
 }
 
-function pagedCatalog(data: Record<string, unknown>, atlases: string[], server: string): Catalog {
-  const { total, pages, lookup, mods, search, revision, state, expected } = data;
+function recipePublishedAt(response: Response) {
+  const value = Date.parse(response.headers.get('X-Catalog-Published-At') ?? '');
+  return Number.isFinite(value) ? value : undefined;
+}
+
+function pagedCatalog(data: Record<string, unknown>, atlases: string[], server: string, publishedAt?: number): Catalog {
+  const { total, pages, lookup, mods, search, revision, state, expected, tooltipShortcuts, recipeItemIcons } = data;
   if (typeof total !== 'number' || !Number.isSafeInteger(total) || total < 0 || !isResource(search) || !isResource(revision)
     || (state !== 'ready' && state !== 'importing' && state !== 'failed')
     || typeof expected !== 'number' || !Number.isSafeInteger(expected) || expected < total
     || !isRecord(pages) || !Array.isArray(pages.cs) || !Array.isArray(pages.en)
     || ![pages.cs, pages.en].every(pageIds => pageIds.length === Math.ceil(total / layout.pageSize) && pageIds.every(isResource))
     || !Array.isArray(lookup) || lookup.length !== 256 || !lookup.every(entry => entry === null || isResource(entry))
+    || (tooltipShortcuts !== undefined && (!Array.isArray(tooltipShortcuts) || !tooltipShortcuts.every(isTooltipShortcut)))
     || !Array.isArray(mods) || !mods.every(mod => typeof mod === 'string' && /^[a-z0-9_.-]+$/.test(mod))) {
     throw new Error('Invalid paged catalog.');
   }
   const pageIds = { cs: pages.cs, en: pages.en };
   const root = `${catalogDirectory(server)}revisions/${revision}/`;
+  const ingredientIconIndex = isResource(recipeItemIcons) ? `${root}payloads/${recipeItemIcons}.json` : undefined;
   const lookupItems = async (hash: string, signal: AbortSignal) =>
     readRecords(await readJson(`${root}lookup/${hash}.json`, signal), layout.version, atlases, root);
   return {
     key: `${revision}:${state}:${search}:${atlases.length}`,
     revision,
+    publishedAt,
     progress: state === 'ready' ? undefined : { loaded: total, expected, failed: state === 'failed' },
     mods,
-    async getPage({ language, page, mod, query }, signal) {
-      if (query.trim() || mod) {
-        const parameters = new URLSearchParams({ server, revision, index: search, language, page: String(page), q: query, mod });
+    tooltipShortcuts,
+    getIcon: name => imageName.test(name) ? iconUrl(root, name, layout.version) : undefined,
+    async getPage({ language, page, query }, signal) {
+      if (query.trim()) {
+        const mod = exactCatalogMod(mods, catalogSearchTerms(query).mods);
+        const parameters = new URLSearchParams({ server, revision, index: search, language, page: String(page),
+          q: mod ? catalogSearchWithMod(query, '') : query, mod: mod ?? '' });
         const data = await readJson(`/api/item-search?${parameters}`, signal);
         if (!isRecord(data) || typeof data.total !== 'number' || !Number.isSafeInteger(data.total) || data.total < 0) {
           throw new Error('Invalid catalog search results.');
@@ -226,9 +257,24 @@ function pagedCatalog(data: Record<string, unknown>, atlases: string[], server: 
       }));
       return items;
     },
-    getRecipeUses: state === 'ready' ? (id, signal) => {
+    getRecipeItemIcons: ingredientIconIndex ? async (ids, signal) => {
+      const data = await readJson(ingredientIconIndex, signal);
+      const icons = new Map<string, string>();
+      if (!isRecord(data)) return icons;
+      for (const id of ids) {
+        const name = data[id];
+        if (isItemId(id) && Object.hasOwn(data, id) && isIcon(name, layout.version)) {
+          icons.set(id, iconUrl(root, name, layout.version));
+        }
+      }
+      return icons;
+    } : undefined,
+    getRecipeUses: state === 'ready' ? async (id, signal, kind) => {
       const parameters = new URLSearchParams({ server, revision, id });
-      return readJson(`/api/item-recipe-uses?${parameters}`, signal);
+      if (kind) parameters.set('kind', kind);
+      const response = await fetch(`/api/item-recipe-uses?${parameters}`, { signal });
+      if (!response.ok) throw new Error(`Recipe request failed with HTTP ${response.status}.`);
+      return { feed: await response.json(), publishedAt: recipePublishedAt(response) };
     } : undefined,
   };
 }
@@ -247,7 +293,9 @@ export async function loadCatalog(server: string, signal: AbortSignal): Promise<
   const version = data.version;
   const atlases = version === 1 ? [] : data.atlases;
   if (!Array.isArray(atlases) || !atlases.every(isResource)) throw new Error('Invalid catalog atlases.');
-  return version === layout.version ? pagedCatalog(data, atlases, server) : legacyCatalog(readRecords(data.items, version, atlases, root));
+  const publishedAt = recipePublishedAt(response);
+  return version === layout.version ? pagedCatalog(data, atlases, server, publishedAt)
+    : { ...legacyCatalog(readRecords(data.items, version, atlases, root)), publishedAt };
 }
 
 async function readDetails(id: string, detail: string): Promise<ItemDetails> {

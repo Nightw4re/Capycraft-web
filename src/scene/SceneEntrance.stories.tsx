@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from '@storybook/react-vite';
 import { SceneEntrance } from './SceneEntrance';
 
 const meta = {
-  title: 'Zimní scéna/Úvodní animace',
+  title: 'Winter Scene/Entrance Animation',
   component: SceneEntrance,
   args: { animate: true },
 } satisfies Meta<typeof SceneEntrance>;
@@ -10,6 +10,5 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const PrijezdLoga: Story = {
-  name: 'Příjezd loga a panelu',
+export const LogoAndPanelEntrance: Story = {
 };

@@ -57,11 +57,12 @@ export function ModPicker({ mods, value, onChange }: {
     setOpen(false);
   }
 
-  function onKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+  function onKeyDown(event: KeyboardEvent<HTMLElement>) {
     if (event.nativeEvent.isComposing) return;
     if (event.key === 'Escape' && open) {
       event.preventDefault();
       event.stopPropagation();
+      input.current?.focus({ preventScroll: true });
       setOpen(false);
     } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
@@ -108,7 +109,10 @@ export function ModPicker({ mods, value, onChange }: {
           </button>
         </div>
         {open && (
-          <div className="header-picker-options header-popup" ref={popup}>
+          <div className="header-picker-options header-popup" ref={popup} tabIndex={-1} onKeyDown={onKeyDown}
+            onPointerDown={event => {
+              if (event.target === event.currentTarget) event.currentTarget.focus({ preventScroll: true });
+            }}>
             <div className="item-mod-options" id={listId} role="listbox" aria-label={text.itemModList}>
               {matches.map((option, index) => (
                 <button key={option.value} id={`${listId}-${index}`} type="button" role="option" tabIndex={-1}

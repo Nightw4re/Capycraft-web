@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import layout from '../src/items/catalogLayout.json' with { type: 'json' };
-import { searchText } from '../src/items/catalogIndex.mjs';
+import { catalogModMatches, catalogSearchTerms } from '../src/items/catalogIndex.mjs';
 import { defaultAlias } from '../src/minecraftServers.mjs';
 import { readCatalogAsset } from './catalogAssets.mts';
 
@@ -19,7 +19,7 @@ export function createServerItemSearch(directories: ReadonlyMap<string, string>)
 }
 
 type SearchIndex = {
-  items: { id: string; name: string; icon?: string; detail?: string; search: string }[];
+  items: { id: string; name: string; icon?: string; detail?: string; search: string; searchTooltip?: string; searchTags?: string[] }[];
   order: Record<'cs' | 'en', number[]>;
 };
 
@@ -67,16 +67,19 @@ export function createItemSearch(directory: string) {
 
     try {
       const index = await loadIndex(revision, indexHash);
-      const terms = searchText(query).trim().split(/\s+/).filter(Boolean);
+      const terms = catalogSearchTerms(query);
       const first = Number(page) * layout.pageSize;
       const prefix = mod ? `${mod}:` : '';
       const items = [];
       let total = 0;
       for (const position of index.order[language]) {
         const record = index.items[position];
-        if ((prefix && !record.id.startsWith(prefix)) || !terms.every(term => record.search.includes(term))) continue;
+        if ((prefix && !record.id.startsWith(prefix)) || !terms.items.every(term => record.search.includes(term))) continue;
+        if (terms.mods.length && !terms.mods.every(term => catalogModMatches(record.id.split(':', 1)[0], term))) continue;
+        if (!terms.tags.every(term => record.searchTags?.some(tag => tag.includes(term)))
+          || !terms.tooltips.every(term => record.searchTooltip?.includes(term))) continue;
         if (total >= first && items.length < layout.pageSize) {
-          const { search, ...item } = record;
+          const { search, searchTooltip, searchTags, ...item } = record;
           items.push(item);
         }
         total++;

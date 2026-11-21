@@ -175,8 +175,45 @@ export function animate<T>(duration: number, sample: (progress: number) => T): T
   return frames;
 }
 
-const transition = (duration: number, from: SkinPose, to: SkinPose) =>
-  animate(duration, progress => seatedAt(blendPose(from, to, ease(progress))));
+type PoseKeyframe = { time: number; pose: SkinPose };
+
+function poseSequence(keyframes: PoseKeyframe[]) {
+  const last = keyframes[keyframes.length - 1];
+  return animate(last.time, progress => {
+    const time = progress * last.time;
+    const end = keyframes.findIndex(key => key.time > time);
+    const [from, to] = [keyframes[end - 1], keyframes[end]];
+    const before = keyframes[end - 2] ?? from;
+    const after = keyframes[end + 1] ?? to;
+    const duration = to.time - from.time;
+    const t = (time - from.time) / duration;
+    const slope = (a: number, b: number) => a * b > 0 ? 2 * a * b / (a + b) : 0;
+
+    // Match velocity at each shared pose while keeping each joint within its keyframe range.
+    function interpolate(a: number, b: number, c: number, d: number) {
+      const speed = (c - b) / duration;
+      const start = before === from ? 0 : slope((b - a) / (from.time - before.time), speed);
+      const finish = after === to ? 0 : slope(speed, (d - c) / (after.time - to.time));
+      return mix(b, c, ease(t)) + duration * t * (1 - t) * ((1 - t) * start - t * finish);
+    }
+
+    function part<T extends Point[]>(name: Exclude<keyof SkinPose, 'headYaw'>): T {
+      return from.pose[name].map((point, joint) => point.map((value, axis) => interpolate(
+        before.pose[name][joint][axis], value, to.pose[name][joint][axis], after.pose[name][joint][axis],
+      ))) as T;
+    }
+
+    return seatedAt({
+      head: part('head'),
+      headYaw: interpolate(before.pose.headYaw, from.pose.headYaw, to.pose.headYaw, after.pose.headYaw),
+      torso: part('torso'),
+      rightArm: part('rightArm'),
+      leftArm: part('leftArm'),
+      rightLeg: part('rightLeg'),
+      leftLeg: part('leftLeg'),
+    });
+  });
+}
 
 function glance(duration: number, from: Gaze, to: Gaze, lift: number) {
   return animate(duration, progress => {
@@ -191,22 +228,23 @@ function glance(duration: number, from: Gaze, to: Gaze, lift: number) {
   });
 }
 
-export const standingUp = [
-  ...transition(490, nugwaPose, braced),
-  ...hold(120, seatedAt(braced)),
-  ...transition(330, braced, pushing),
-  ...transition(340, pushing, crouch),
-  ...transition(550, crouch, standing),
-];
+export const standingUp = poseSequence([
+  { time: 0, pose: nugwaPose },
+  { time: 490, pose: braced },
+  { time: 820, pose: pushing },
+  { time: 1160, pose: crouch },
+  { time: 1710, pose: standing },
+]);
 
-export const sittingDown = [
-  ...transition(530, standing, crouch),
-  ...transition(310, crouch, pushing),
-  ...transition(350, pushing, braced),
-  ...transition(460, braced, nugwaPose),
-];
+export const sittingDown = poseSequence([
+  { time: 0, pose: standing },
+  { time: 530, pose: crouch },
+  { time: 840, pose: pushing },
+  { time: 1190, pose: braced },
+  { time: 1650, pose: nugwaPose },
+]);
 
-export const soloFrames = [
+export const departureFrames = [
   ...hold(6600, seatedFigure),
   ...glance(510, restingGaze, leftGaze, 0.25),
   ...hold(450, seatedAt(look(leftGaze))),
@@ -223,6 +261,9 @@ export const soloFrames = [
   ...animate(400, progress => wave(1 - ease(progress))),
   ...animate(560, progress => turn(waveX, viewerYaw, leftYaw, progress)),
   ...animate(1260, progress => walk(waveX, exitX, 1.35, progress)),
+];
+
+export const arrivalFrames = [
   ...hold(2400, emptyFrame),
   ...animate(440, progress => peek(ease(progress))),
   ...hold(520, peek(1)),

@@ -15,6 +15,7 @@ export type MinecraftServer = {
   address?: string;
   players?: { current?: number; max?: number };
   uptimeMinutes?: number;
+  totalUptimeMinutes?: number;
   worldAgeDays?: number;
   worldAgeMinutes?: number;
   status?: ServerStatus;
@@ -24,21 +25,18 @@ export type MinecraftServer = {
 
 const unavailableStat = '—';
 
-function formatDuration(minutes: number, language: Language) {
-  const parts = [
-    { unit: 'day', value: Math.floor(minutes / 1440) },
-    { unit: 'hour', value: Math.floor(minutes / 60) % 24 },
-    { unit: 'minute', value: minutes % 60 },
-  ];
-  const visible = minutes < 60 ? parts.slice(1) : parts.filter(({ value }) => value > 0).slice(0, 2);
-  return visible
-    .map(({ unit, value }) => new Intl.NumberFormat(language, { style: 'unit', unit, unitDisplay: 'narrow' }).format(value))
-    .join(' ');
+function formatDuration(value: number, language: Language, precision: 'minute' | 'day' = 'minute') {
+  const format = (amount: number, unit: 'day' | 'hour' | 'minute') =>
+    new Intl.NumberFormat(language, { style: 'unit', unit, unitDisplay: 'narrow' }).format(amount);
+  if (precision === 'day') return format(value, 'day');
+  return value < 1440
+    ? `${format(Math.floor(value / 60), 'hour')} ${format(value % 60, 'minute')}`
+    : `${format(Math.floor(value / 1440), 'day')} ${format(Math.floor(value / 60) % 24, 'hour')}`;
 }
 
 export function ServerCard({ server }: { server: MinecraftServer }) {
   const { language, text } = usePreferences();
-  const { address, motd, name, players, uptimeMinutes, worldAgeDays, worldAgeMinutes,
+  const { address, motd, name, players, uptimeMinutes, totalUptimeMinutes, worldAgeDays, worldAgeMinutes,
     status, lastSeenAt, modpack } = server;
   const nameId = useId();
   const statusId = useId();
@@ -51,9 +49,9 @@ export function ServerCard({ server }: { server: MinecraftServer }) {
   const motdParts = motd ? parseMinecraftMotd(motd) : [];
   const logo = server.logo && <img className="server-card-logo-art" src={server.logo} width={44} height={44} alt="" loading="lazy" />;
   const lastSeen = lastSeenAt !== undefined && (status === 'offline' || status === 'unavailable') ? new Date(lastSeenAt) : undefined;
-  const worldAge = worldAgeDays !== undefined
-    ? new Intl.NumberFormat(language, { style: 'unit', unit: 'day', unitDisplay: 'narrow' }).format(worldAgeDays)
-    : worldAgeMinutes === undefined ? undefined : formatDuration(worldAgeMinutes, language);
+  const displayedUptime = totalUptimeMinutes ?? uptimeMinutes;
+  const worldAge = worldAgeMinutes !== undefined ? formatDuration(worldAgeMinutes, language)
+    : worldAgeDays === undefined ? undefined : formatDuration(worldAgeDays, language, 'day');
 
   useLayoutEffect(() => {
     const tooltip = statusTooltip.current;
@@ -102,7 +100,6 @@ export function ServerCard({ server }: { server: MinecraftServer }) {
         ) : <span className="server-card-logo">{logo}</span>)}
         <div>
           <div className="server-card-title">
-            <h3 id={nameId}>{name}</h3>
             {status && <div className="server-card-status"
               onPointerEnter={event => {
                 if (event.pointerType === 'mouse') setStatusHint(current => current ?? 'hover');
@@ -130,6 +127,7 @@ export function ServerCard({ server }: { server: MinecraftServer }) {
                 </span>}
               </span>
             </div>}
+            <h3 id={nameId}>{name}</h3>
           </div>
           {motdParts.some(part => part.text.trim()) && <p className="server-card-motd">
             {motdParts.map(part => <span key={part.start} style={part.style}>{part.text}</span>)}
@@ -145,8 +143,8 @@ export function ServerCard({ server }: { server: MinecraftServer }) {
             {players?.max !== undefined && ` / ${formatNumber.format(players.max)}`}</dd>
         </div>
         <div>
-          <dt>{text.serverUptime}</dt>
-          <dd>{uptimeMinutes === undefined ? unavailableStat : formatDuration(uptimeMinutes, language)}</dd>
+          <dt>{totalUptimeMinutes === undefined ? text.serverUptime : text.serverTotalUptime}</dt>
+          <dd>{displayedUptime === undefined ? unavailableStat : formatDuration(displayedUptime, language)}</dd>
         </div>
         {worldAge !== undefined && <div>
           <dt>{text.serverWorldAge}</dt>

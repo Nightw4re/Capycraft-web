@@ -1,0 +1,13 @@
+@capycraftRecipeUses {
+	method GET
+	path /api/item-recipe-uses
+}
+
+handle @capycraftRecipeUses {
+	route {
+		cache {
+			ttl 30m
+		}
+		reverse_proxy {args[0]}
+	}
+}

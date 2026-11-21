@@ -1,30 +1,45 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FocusEvent, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FocusEvent, type MouseEvent, type PointerEvent, type ReactNode, type RefObject } from 'react';
+import { createPortal } from 'react-dom';
 import copyIcon from '../../assets/pixel-copy-papers.png';
 import { InfoPanel } from '../layout/InfoPanel';
 import { PageLayout } from '../layout/PageLayout';
+import { PlayIcon } from '../layout/PlayIcon';
+import { plainMinecraftText } from '../layout/minecraftMotd';
 import { useNotifications } from '../notifications/Notifications';
 import type { ItemRecipeView, ItemRoute, RecipeIngredientRoute } from '../navigation';
+import type { TooltipModes } from '../preferences';
 import { usePreferences } from '../PreferencesProvider';
 import { HeaderPicker } from '../scene/HeaderPicker';
 import { useSceneContentReady } from '../scene/SceneEntrance';
+import { animatePageArrival, animatePageDeparture } from '../scene/pageMotion';
+import { useHeaderDisclosure } from '../scene/useHeaderDisclosure';
 import { useLiveCatalog } from '../ServerDirectoryProvider';
 import { isItemId, loadCatalog, loadItemDetails, loadItemPayload, type Catalog, type CatalogItem, type ItemSprite, type ItemVariant } from './catalogData';
-import type { ItemBar } from './catalogIndex.mjs';
+import { catalogSearchTerms, catalogSearchWithMod, type ItemBar } from './catalogIndex.mjs';
 import { pageSize, atlasColumns, tileSize } from './catalogLayout.json';
 import { ItemLoadingHint } from './ItemLoadingHint';
 import { ModPicker } from './ModPicker';
-import { readLegacyRecipes, readRecipeFeed, recipeStations, type MachineRecipe, type RecipeEntry, type RecipeIngredient } from './itemRecipes';
-import { ItemTooltip, ItemTooltipPopover, loadPageTooltipShortcuts, useItemTooltip } from './ItemTooltip';
-import { ItemTooltipTools, tooltipShortcutColor, type TooltipModes } from './ItemTooltipTools';
+import { readLegacyRecipes, readRecipeFeed, recipeStations, type MachineIngredient, type MachineRecipe, type MachineRecipeSlot, type RecipeEntry, type RecipeIngredient } from './itemRecipes';
+import { ItemTooltip, ItemTooltipPopover, MinecraftItemText, loadPageTooltipShortcuts, useItemTooltip } from './ItemTooltip';
+import { ItemTooltipTools, tooltipShortcutColor } from './ItemTooltipTools';
 import './items.css';
 
 const atlasRows = pageSize / atlasColumns;
 const iconTimeoutMs = 8000;
 const itemHoldMs = 500;
 const recipesPerPage = 3;
+const ingredientVariantsPerPage = 18;
 const ingredientRotationMs = 2000;
 const ingredientTooltipLimit = 12;
-const pageWheelDelayMs = 90;
+const pageSelectionDelayMs = 90;
+const itemDetailsLoadingDelayMs = 180;
+const wideCatalogQuery = '(min-width: 68rem)';
+
+function animateItemArrival(element: HTMLElement | null | undefined, direction = 1) {
+  if (element?.animate && window.matchMedia('(prefers-reduced-motion: no-preference)').matches) {
+    return animatePageArrival(element, direction);
+  }
+}
 
 type ItemNavigation = {
   itemHref: (id: string, view?: ItemRecipeView) => string;
@@ -37,9 +52,18 @@ type IngredientNavigation = {
   onCloseIngredient: () => void;
 };
 
-type ServerItemsProps = ItemNavigation & Omit<IngredientNavigation, 'ingredient'> & {
+type RecipeNavigation = IngredientNavigation & {
+  recipeStation?: string;
+  recipePage?: number;
+  onRecipePositionChange: (station: string, page?: number) => void;
+};
+
+type ServerItemsProps = ItemNavigation & Omit<RecipeNavigation, 'ingredient' | 'recipeStation' | 'recipePage'> & {
   server: string;
   showCatalog: boolean;
+  page: number;
+  query: string;
+  onPageChange: (page: number, query?: string) => void;
   item?: ItemRoute;
   onCloseItem: () => void;
 };
@@ -104,7 +128,8 @@ function ItemIcon({ icon, sprite, bar, fluid = false, pending = false, lazy = fa
   }, [imageUrl, onImageSettled, timeout]);
 
   return (
-    <span className="item-icon" aria-hidden="true" data-pending={pending || undefined} data-fluid={fluid || undefined}>
+    <span className="item-icon" aria-hidden="true" data-pending={pending || undefined} data-fluid={fluid || undefined}
+      style={fluid && imageUrl ? { '--item-fluid-texture': `url("${imageUrl}")` } as CSSProperties : undefined}>
       {sprite && (
         <span className="item-sprite" style={{
           backgroundImage: `url("${sprite.url}")`,
@@ -213,7 +238,7 @@ function ItemLink({ item, label = item.name, itemHref, description, showTooltip,
     onOpenItem(item.id, view, item);
   }
 
-  return <a className="item-slot-button" href={itemHref(item.id)} aria-label={label} aria-haspopup="dialog"
+  return <a className="item-slot-button" href={itemHref(item.id)} aria-label={plainMinecraftText(label)} aria-haspopup="dialog"
     aria-describedby={tooltip.active ? description?.id : undefined}
     aria-keyshortcuts="Shift+F10"
     data-holding={holding || undefined} style={holding ? { '--item-hold-duration': `${itemHoldMs}ms` } as CSSProperties : undefined}
@@ -271,17 +296,27 @@ function ItemLink({ item, label = item.name, itemHref, description, showTooltip,
   </a>;
 }
 
-export function ServerItems({ server, showCatalog, item, onCloseItem, onOpenIngredient, onCloseIngredient, ...navigation }: ServerItemsProps) {
-  const { language, text } = usePreferences();
+export function ServerItems({ server, showCatalog, page, query, onPageChange, item, onCloseItem, onRecipePositionChange,
+  onOpenIngredient, onCloseIngredient, ...navigation }: ServerItemsProps) {
+  const { language, text, tooltipModes, update } = usePreferences();
   const load = useCallback((signal: AbortSignal) => loadCatalog(server, signal), [server]);
   const { state: initial, retry: retryInitial } = useRequest(load);
   const [refreshed, setRefreshed] = useState<Catalog | null>();
   const { status: importStatus, version } = useLiveCatalog(server) ?? {};
-  const [tooltipModes, setTooltipModes] = useState<TooltipModes>({ advanced: false });
+  const [tooltipToolsHost, setTooltipToolsHost] = useState<HTMLDivElement | null>(null);
   const [openedItem, setOpenedItem] = useState<{ catalog: Catalog; preview: CatalogItem }>();
+  const [wideCatalog, setWideCatalog] = useState(() => window.matchMedia(wideCatalogQuery).matches);
+  const inlineDetails = showCatalog && wideCatalog;
+  const requestedInlineItem = inlineDetails ? item : undefined;
+  const [retainedItem, setRetainedItem] = useState(requestedInlineItem);
+  const visibleItem = item ?? (inlineDetails ? retainedItem : undefined);
+  const splitOpen = inlineDetails && !!visibleItem;
+  const detailClosing = splitOpen && !item;
+  const layout = useRef<HTMLDivElement>(null);
+  const [splitReady, setSplitReady] = useState(false);
   const state = refreshed === undefined ? initial : { status: 'ready' as const, data: refreshed };
   const catalog = state.status === 'ready' ? state.data : null;
-  const preview = openedItem && openedItem.catalog === catalog && openedItem.preview.id === item?.id ? openedItem.preview : undefined;
+  const preview = openedItem && openedItem.catalog === catalog && openedItem.preview.id === visibleItem?.id ? openedItem.preview : undefined;
   const progress = catalog?.progress;
   const format = new Intl.NumberFormat(language);
   let notice = '';
@@ -309,6 +344,58 @@ export function ServerItems({ server, showCatalog, item, onCloseItem, onOpenIngr
   }
 
   useEffect(() => {
+    const media = window.matchMedia(wideCatalogQuery);
+    const update = () => setWideCatalog(media.matches);
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (requestedInlineItem) {
+      setRetainedItem(requestedInlineItem);
+      return;
+    }
+    if (!detailClosing) {
+      setRetainedItem(undefined);
+      return;
+    }
+    const panel = layout.current?.querySelector<HTMLElement>('.item-detail-overlay[open] > .item-recipe-detail');
+    if (!panel?.animate || !window.matchMedia('(prefers-reduced-motion: no-preference)').matches) {
+      setRetainedItem(undefined);
+      return;
+    }
+    const departure = animatePageDeparture(panel, -1);
+    const finish = () => setRetainedItem(undefined);
+    departure.onfinish = finish;
+    departure.oncancel = finish;
+    return () => {
+      departure.onfinish = null;
+      departure.oncancel = null;
+      departure.cancel();
+    };
+  }, [detailClosing, requestedInlineItem]);
+
+  useLayoutEffect(() => {
+    const element = layout.current;
+    if (!splitOpen || !element) {
+      setSplitReady(false);
+      return;
+    }
+    // Flush the new grid styles so the layout transitions are available to await.
+    getComputedStyle(element).gridTemplateColumns;
+    const transitions = element.getAnimations?.() ?? [];
+    if (!transitions.length) {
+      setSplitReady(true);
+      return;
+    }
+    let active = true;
+    void Promise.allSettled(transitions.map(transition => transition.finished)).then(() => {
+      if (active) setSplitReady(true);
+    });
+    return () => { active = false; };
+  }, [splitOpen]);
+
+  useEffect(() => {
     if (version === undefined) return;
     if (version === null) {
       setRefreshed(null);
@@ -328,41 +415,60 @@ export function ServerItems({ server, showCatalog, item, onCloseItem, onOpenIngr
     retryInitial();
   }
 
+  function setTooltipModes(modes: TooltipModes) {
+    update({ tooltipModes: modes });
+  }
+
+  function openCatalogItem(id: string, view?: ItemRecipeView, preview?: CatalogItem) {
+    setOpenedItem(catalog && preview ? { catalog, preview } : undefined);
+    navigation.onOpenItem(id, view);
+  }
+
+  const detail = visibleItem && <ItemDialog inline={inlineDetails} layoutReady={!inlineDetails || splitReady}
+    closing={detailClosing} itemId={visibleItem.id} preview={preview} recipeView={visibleItem.view}
+    ingredient={item?.ingredient} recipeStation={visibleItem.station}
+    catalog={catalog} modes={tooltipModes} onModesChange={setTooltipModes} onClose={onCloseItem}
+    recipePage={visibleItem.recipePage} onRecipePositionChange={onRecipePositionChange}
+    onOpenIngredient={onOpenIngredient} onCloseIngredient={onCloseIngredient}
+    itemHref={navigation.itemHref} onOpenItem={openCatalogItem}>
+    {state.status === 'loading' ? <p role="status">{text.itemLoading}</p> : <div>
+      <p role="status">{state.status === 'error' ? text.itemLoadError : text.itemCatalogUnavailable}</p>
+      <button className="item-action" type="button" onClick={retry}>{text.retry}</button>
+    </div>}
+  </ItemDialog>;
+
   return <>
-    {showCatalog && !item && !catalog && <ItemTooltipTools modes={tooltipModes} onChange={setTooltipModes} />}
+    {showCatalog && !visibleItem && <div className="item-catalog-tools-anchor">
+      <div className="item-catalog-tools-float" ref={setTooltipToolsHost}>
+        {!catalog && <ItemTooltipTools modes={tooltipModes} onChange={setTooltipModes} />}
+      </div>
+    </div>}
+    {showCatalog && <div className="item-import-notice"><p role="status">{notice}</p></div>}
     {showCatalog && <PageLayout title={text.items}>
-      <InfoPanel>
-        <p className="item-catalog-language">{text.itemCatalogLanguage}</p>
-        <p className="item-import-progress" role="status">{notice}</p>
-        {state.status === 'loading' && <p role="status">{text.itemLoading}</p>}
-        {state.status === 'error' && (
-          <div>
-            <p role="status">{text.itemLoadError}</p>
-            <button className="item-action" type="button" onClick={retry}>{text.retry}</button>
-          </div>
-        )}
-        {state.status === 'ready' && !catalog && (
-          <div>
-            <p role="status">{text.itemCatalogUnavailable}</p>
-            <button className="item-action" type="button" onClick={retry}>{text.retry}</button>
-          </div>
-        )}
-        {catalog && <ItemList catalog={catalog} modes={tooltipModes} onModesChange={setTooltipModes}
-          dialogOpen={!!item} itemHref={navigation.itemHref}
-          onOpenItem={(id, view, preview) => {
-            setOpenedItem(preview && { catalog, preview });
-            navigation.onOpenItem(id, view);
-          }} />}
-      </InfoPanel>
+      <div className="item-catalog-layout" ref={layout} data-wide={inlineDetails || undefined} data-split={splitOpen || undefined}>
+        <InfoPanel>
+          {state.status === 'loading' && <p role="status">{text.itemLoading}</p>}
+          {state.status === 'error' && (
+            <div>
+              <p role="status">{text.itemLoadError}</p>
+              <button className="item-action" type="button" onClick={retry}>{text.retry}</button>
+            </div>
+          )}
+          {state.status === 'ready' && !catalog && (
+            <div>
+              <p role="status">{text.itemCatalogUnavailable}</p>
+              <button className="item-action" type="button" onClick={retry}>{text.retry}</button>
+            </div>
+          )}
+          {catalog && <ItemList catalog={catalog} page={page} query={query} onPageChange={onPageChange}
+            modes={tooltipModes} onModesChange={setTooltipModes}
+            dialogOpen={!!item && !inlineDetails} tooltipToolsHost={!visibleItem ? tooltipToolsHost : null} itemHref={navigation.itemHref}
+            onOpenItem={openCatalogItem} />}
+        </InfoPanel>
+        {detail}
+      </div>
     </PageLayout>}
-    {item && <ItemDialog key={item.id} itemId={item.id} preview={preview} recipeView={item.view} ingredient={item.ingredient}
-      catalog={catalog} modes={tooltipModes} onModesChange={setTooltipModes} onClose={onCloseItem}
-      onOpenIngredient={onOpenIngredient} onCloseIngredient={onCloseIngredient} {...navigation}>
-      {state.status === 'loading' ? <p role="status">{text.itemLoading}</p> : <div>
-        <p role="status">{state.status === 'error' ? text.itemLoadError : text.itemCatalogUnavailable}</p>
-        <button className="item-action" type="button" onClick={retry}>{text.retry}</button>
-      </div>}
-    </ItemDialog>}
+    {!showCatalog && detail}
   </>;
 }
 
@@ -375,94 +481,168 @@ type InventoryPage = {
   useAtlases: boolean;
 };
 
-type WheelPage = { source: string; number: number };
-const blankInventory = { key: 'wheel-loading', items: [], useAtlases: false };
+type PageTarget = { source: string; number: number };
 
-function ItemList({ catalog, modes, onModesChange, dialogOpen, ...navigation }: ItemNavigation & {
+function ItemList({ catalog, page, query, onPageChange, modes, onModesChange, dialogOpen, tooltipToolsHost, ...navigation }: ItemNavigation & {
   catalog: Catalog;
+  page: number;
+  query: string;
+  onPageChange: ServerItemsProps['onPageChange'];
   modes: TooltipModes;
   onModesChange: (modes: TooltipModes) => void;
   dialogOpen: boolean;
+  tooltipToolsHost: HTMLDivElement | null;
 }) {
   const { language, text } = usePreferences();
-  const [search, setSearch] = useState('');
-  const [query, setQuery] = useState('');
-  const [mod, setMod] = useState('');
-  const [page, setPage] = useState(0);
-  const [wheelPage, setWheelPage] = useState<WheelPage>();
-  const wheelIntent = useRef<WheelPage>(undefined);
-  const source = JSON.stringify([catalog.key, language, mod, query]);
-  const wheelTarget = wheelPage?.source === source ? wheelPage.number : undefined;
+  const [search, setSearch] = useState(query);
+  const mod = catalogSearchTerms(search).mods.at(-1) ?? '';
+  const selectedMod = catalog.mods.find(namespace => namespace.replaceAll('_', ' ') === mod) ?? mod;
+  const [pendingPage, setPendingPage] = useState<PageTarget>();
+  const pageIntent = useRef<PageTarget>(undefined);
+  const source = JSON.stringify([catalog.key, language, query]);
+  const targetPage = pendingPage?.source === source ? pendingPage.number : undefined;
   const [hovered, setHovered] = useState<TooltipTarget<HTMLAnchorElement> & { item: CatalogItem }>();
   const tooltipId = useId();
   const tooltip = dialogOpen ? undefined : hovered;
   const tooltipData = useItemTooltip(tooltip?.item);
   const [shown, setShown] = useState<InventoryPage>();
-  const resultCount = useRef<HTMLParagraphElement>(null);
   const inventory = useRef<HTMLDivElement>(null);
-  const clearWheel = useCallback(() => {
-    wheelIntent.current = undefined;
-    setWheelPage(undefined);
+  const clearTarget = useCallback(() => {
+    pageIntent.current = undefined;
+    setPendingPage(undefined);
   }, []);
+
+  useLayoutEffect(() => {
+    setSearch(query);
+  }, [query]);
+
   useEffect(() => {
     if (search === query) return;
     const timer = window.setTimeout(() => {
       setHovered(undefined);
-      clearWheel();
-      setQuery(search);
-      setPage(0);
+      clearTarget();
+      onPageChange(0, search);
     }, 180);
     return () => window.clearTimeout(timer);
-  }, [search, query, clearWheel]);
+  }, [search, query, clearTarget, onPageChange]);
 
   useEffect(() => {
-    if (wheelTarget === undefined || wheelTarget === page) return;
-    const timer = window.setTimeout(() => setPage(wheelTarget), pageWheelDelayMs);
+    if (targetPage === undefined || targetPage === page) return;
+    const timer = window.setTimeout(() => onPageChange(targetPage), pageSelectionDelayMs);
     return () => window.clearTimeout(timer);
-  }, [page, wheelTarget]);
+  }, [page, targetPage, onPageChange]);
 
-  const loadPage = useMemo(() => (signal: AbortSignal) => catalog.getPage({ language, page, mod, query }, signal),
-    [catalog, language, page, mod, query]);
-  const { state, retry } = useRequest(loadPage, wheelTarget === undefined || wheelTarget === page);
+  const loadPage = useMemo(() => (signal: AbortSignal) => catalog.getPage({ language, page, query }, signal),
+    [catalog, language, page, query]);
+  const { state, retry } = useRequest(loadPage, targetPage === undefined || targetPage === page);
   const result = state.status === 'ready' ? state.data : undefined;
-  const requested = useMemo<InventoryPage | undefined>(() => result && ({
+  const lastAvailablePage = result && !catalog.progress ? Math.max(0, Math.ceil(result.total / pageSize) - 1) : undefined;
+  const outOfBounds = lastAvailablePage !== undefined && page > lastAvailablePage;
+  useEffect(() => {
+    if (!outOfBounds) return;
+    clearTarget();
+    onPageChange(lastAvailablePage);
+  }, [outOfBounds, lastAvailablePage, clearTarget, onPageChange]);
+  const requested = useMemo<InventoryPage | undefined>(() => result && !outOfBounds ? ({
     ...result,
     key: JSON.stringify([source, page]),
     source,
     number: page,
-    useAtlases: !query.trim() && !mod,
-  }), [result, source, page, mod, query]);
-  const knownPage = shown ?? requested;
-  const displayed = wheelTarget === undefined ? knownPage : requested;
-  const wheelPending = wheelTarget !== undefined && !displayed;
-  const gridPage = displayed ?? (wheelPending ? blankInventory : undefined);
+    useAtlases: !query.trim(),
+  }) : undefined, [result, outOfBounds, source, page, query]);
+  const displayed = shown ?? requested;
   const displayedItems = displayed?.items;
   const loadShortcuts = useCallback((signal: AbortSignal) => loadPageTooltipShortcuts(displayedItems ?? [], signal),
     [displayedItems]);
-  const { state: shortcuts } = useRequest(loadShortcuts);
-  const activeShortcut = shortcuts.status === 'ready'
-    ? shortcuts.data.find(shortcut => shortcut.id === modes.shortcut) : undefined;
-  const highlight = activeShortcut
-    ? { color: tooltipShortcutColor(activeShortcut.id), itemIds: activeShortcut.itemIds } : undefined;
-  const preparing = wheelTarget === undefined && shown?.items.length && requested?.items.length
+  const { state: shortcuts } = useRequest(loadShortcuts, catalog.tooltipShortcuts === undefined);
+  const pageShortcuts = shortcuts.status === 'ready' ? shortcuts.data : undefined;
+  const selectedShortcut = modes.shortcut;
+  const highlightedItems = selectedShortcut === undefined ? undefined : catalog.tooltipShortcuts === undefined
+    ? pageShortcuts?.find(shortcut => shortcut.id === selectedShortcut)?.itemIds
+    : new Set(displayedItems?.filter(item => item.tooltipShortcutIds?.includes(selectedShortcut)).map(item => item.id));
+  const highlight = selectedShortcut !== undefined && highlightedItems?.size
+    ? { color: tooltipShortcutColor(selectedShortcut), itemIds: highlightedItems } : undefined;
+  const preparing = shown && requested?.items.length
     && shown.key !== requested.key ? requested : undefined;
-  const loading = state.status === 'loading' || preparing !== undefined;
-  const displayedNumber = displayed?.number ?? wheelTarget ?? page;
-  const pageCount = Math.ceil((displayed?.total ?? knownPage?.total ?? 0) / pageSize);
-  const showPagination = displayedNumber > 0 || pageCount > 1;
-  const format = new Intl.NumberFormat(language);
+  const loading = state.status === 'loading' || outOfBounds || preparing !== undefined;
+  const displayedNumber = displayed?.number ?? page;
+  const pageCount = Math.ceil((displayed?.total ?? 0) / pageSize);
+  const selectedPage = targetPage ?? displayedNumber;
+  const canNavigate = displayed?.source === source;
+
+  const hasGrid = displayed !== undefined;
+  useLayoutEffect(() => {
+    const frame = inventory.current;
+    if (!hasGrid || !frame || typeof ResizeObserver === 'undefined') return;
+    const catalogLayout = frame.closest<HTMLElement>('.item-catalog-layout');
+    let settledWidth = 0;
+
+    const releaseGrid = () => {
+      frame.removeAttribute('data-layout-resizing');
+      frame.style.removeProperty('--inventory-frozen-width');
+    };
+
+    const resize = () => {
+      const scroller = frame.querySelector<HTMLElement>('.item-inventory:not([data-preparing])');
+      const grid = scroller?.firstElementChild;
+      if (!grid || !scroller.clientWidth) return;
+      // Preserve the previous slot geometry while the catalog clips or reveals the grid.
+      if (settledWidth && catalogLayout?.getAnimations?.().some(animation =>
+        'transitionProperty' in animation && animation.transitionProperty === 'grid-template-columns'
+        && animation.playState === 'running')) {
+        frame.setAttribute('data-layout-resizing', '');
+        frame.style.setProperty('--inventory-frozen-width', `${settledWidth}px`);
+        return;
+      }
+      releaseGrid();
+      const { clientWidth: width, clientHeight: height } = scroller;
+      settledWidth = width;
+      const rem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
+      const gap = Number.parseFloat(getComputedStyle(grid).columnGap);
+      const compact = window.matchMedia('(max-width: 27rem)').matches;
+      const preferred = (compact ? 2.75 : 3.25) * rem;
+      const minimum = (compact || window.matchMedia('(pointer: coarse)').matches ? 2.75 : 2) * rem;
+      const first = Math.max(1, Math.floor((width + gap) / (preferred + gap)));
+      const last = Math.max(first, Math.floor((width + gap) / (minimum + gap)));
+      let columns = first;
+      for (; columns < last; columns++) {
+        const rows = Math.ceil(pageSize / columns);
+        const size = (width - (columns - 1) * gap) / columns;
+        if (rows * size + (rows - 1) * gap <= height) break;
+      }
+      frame.style.setProperty('--inventory-tracks', `repeat(${columns}, minmax(0, 1fr))`);
+    };
+
+    function handleLayoutTransition(event: TransitionEvent) {
+      if (event.target === catalogLayout && event.propertyName === 'grid-template-columns') resize();
+    }
+    const observer = new ResizeObserver(resize);
+    observer.observe(frame);
+    catalogLayout?.addEventListener('transitionrun', handleLayoutTransition);
+    catalogLayout?.addEventListener('transitionend', handleLayoutTransition);
+    catalogLayout?.addEventListener('transitioncancel', handleLayoutTransition);
+    resize();
+    return () => {
+      observer.disconnect();
+      catalogLayout?.removeEventListener('transitionrun', handleLayoutTransition);
+      catalogLayout?.removeEventListener('transitionend', handleLayoutTransition);
+      catalogLayout?.removeEventListener('transitioncancel', handleLayoutTransition);
+      releaseGrid();
+    };
+  }, [hasGrid]);
 
   useLayoutEffect(() => {
-    const intent = wheelIntent.current;
-    if (intent && intent.source !== source) clearWheel();
+    const intent = pageIntent.current;
+    if (intent && intent.source !== source) clearTarget();
     if (intent?.source === source && requested?.number !== intent.number) return;
     if (!requested || preparing) return;
     setShown(requested);
-    if (wheelTarget === requested.number) clearWheel();
-  }, [requested, preparing, source, wheelTarget, clearWheel]);
+    if (targetPage === requested.number) clearTarget();
+  }, [requested, preparing, source, targetPage, clearTarget]);
 
   const showPreparedPage = useCallback(() => {
-    if (!preparing || wheelIntent.current?.source === source) return;
+    const intent = pageIntent.current;
+    if (!preparing || (intent?.source === source && intent.number !== preparing.number)) return;
     setHovered(undefined);
     setShown(preparing);
   }, [preparing, source]);
@@ -480,43 +660,41 @@ function ItemList({ catalog, modes, onModesChange, dialogOpen, ...navigation }: 
     if (hovered.touch || !hovered.anchor.matches(':hover, :focus-visible')) hideTooltip(hovered.anchor);
   }
 
-  function navigate(nextPage: number) {
+  const selectPage = useCallback((number: number) => {
+    const target = { source, number };
+    pageIntent.current = target;
     setHovered(undefined);
-    clearWheel();
-    if (nextPage === page) retry();
-    else setPage(nextPage);
-    resultCount.current?.focus({ preventScroll: true });
-  }
+    setPendingPage(target);
+  }, [source]);
+
+  const movePage = useCallback((offset: number) => {
+    if (!canNavigate) return false;
+    const intent = pageIntent.current;
+    const current = intent?.source === source ? intent.number : displayedNumber;
+    const next = Math.max(0, Math.min(pageCount - 1, current + offset));
+    if (next === current) return false;
+    selectPage(next);
+    return true;
+  }, [canNavigate, displayedNumber, pageCount, selectPage, source]);
 
   useEffect(() => {
     const frame = inventory.current;
-    if (!frame || !knownPage || knownPage.source !== source || dialogOpen) return;
-    const { total, number } = knownPage;
-    const lastPage = Math.max(0, Math.ceil(total / pageSize) - 1);
-
+    if (!frame || !displayed || displayed.source !== source || dialogOpen) return;
     function onWheel(event: WheelEvent) {
       if (event.ctrlKey || event.metaKey || event.shiftKey || !event.deltaY || Math.abs(event.deltaX) >= Math.abs(event.deltaY)) return;
       const scroller = event.target instanceof Element ? event.target.closest('.item-inventory') : null;
       if (!scroller) return;
       const forward = event.deltaY > 0;
-      const intent = wheelIntent.current?.source === source ? wheelIntent.current : undefined;
       const canScroll = forward
         ? scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop > 1
         : scroller.scrollTop > 1;
-      if (!intent && canScroll) return;
-      const current = intent?.number ?? number;
-      const next = Math.max(0, Math.min(lastPage, current + (forward ? 1 : -1)));
-      if (next === current) return;
-      event.preventDefault();
-      const turn = { source, number: next };
-      wheelIntent.current = turn;
-      setHovered(undefined);
-      setWheelPage(turn);
+      if (canScroll) return;
+      if (movePage(forward ? 1 : -1)) event.preventDefault();
     }
 
     frame.addEventListener('wheel', onWheel, { passive: false });
     return () => frame.removeEventListener('wheel', onWheel);
-  }, [dialogOpen, knownPage, source]);
+  }, [dialogOpen, displayed, movePage, source]);
 
   return (
     <>
@@ -525,21 +703,22 @@ function ItemList({ catalog, modes, onModesChange, dialogOpen, ...navigation }: 
           {text.itemSearch}
           <input type="search" value={search} maxLength={256} onChange={event => setSearch(event.target.value)} />
         </label>
-        <ModPicker mods={catalog.mods} value={mod}
-          onChange={value => { hideTooltip(); clearWheel(); setMod(value); setPage(0); }} />
+        <ModPicker mods={catalog.mods} value={selectedMod} onChange={value => {
+          const next = catalogSearchWithMod(search, value);
+          hideTooltip();
+          clearTarget();
+          setSearch(next);
+          onPageChange(0, next);
+        }} />
       </div>
-      <div className="item-results-status">
-        <p className="item-result-count" role="status" ref={resultCount} tabIndex={-1}>
-          {state.status === 'error' ? text.itemLoadError :
-            pageCount > 0 ? text.itemPage(format.format(displayedNumber + 1), format.format(pageCount)) :
-              state.status === 'loading' ? text.itemLoading : text.itemEmpty}
-        </p>
-        {displayed && loading && <ItemLoadingHint label={text.itemLoading} />}
-      </div>
+      {state.status === 'error' ? <p role="status">{text.itemLoadError}</p>
+        : !displayed ? <p role="status">{text.itemLoading}</p>
+          : !pageCount && <p role="status">{text.itemEmpty}</p>}
       {state.status === 'error' && <button className="item-action" type="button" onClick={retry}>{text.retry}</button>}
-      {gridPage && (
+      {displayed && (
         <div className="item-inventory-frame" aria-busy={loading} ref={inventory}>
-          {[gridPage, preparing].map(view => view && (
+          {loading && <div className="item-pagination-loading"><ItemLoadingHint label={text.itemLoading} /></div>}
+          {[displayed, preparing].map(view => view && (
             <div key={view.key} className="item-inventory" data-preparing={view === preparing || undefined}
               inert={view === preparing} onScroll={event => updateTooltipOnScroll(event.currentTarget)}>
               <ItemGrid items={view.items} useAtlases={view.useAtlases}
@@ -553,19 +732,56 @@ function ItemList({ catalog, modes, onModesChange, dialogOpen, ...navigation }: 
       )}
       <ItemTooltip id={tooltipId} modes={modes} data={tooltipData}
         item={tooltip?.item} anchor={tooltip?.anchor} onDismiss={hideTooltip} />
-      {!dialogOpen && <div className="item-catalog-tools-anchor">
-        <ItemTooltipTools modes={modes} onChange={onModesChange}
-          shortcuts={shortcuts.status === 'ready' ? shortcuts.data : undefined} />
-      </div>}
-      <div className="item-pagination" data-hidden={!showPagination || undefined}>
-        <button className="item-action" type="button" disabled={loading || displayedNumber === 0} onClick={() => navigate(displayedNumber - 1)}>{text.itemPrevious}</button>
-        <button className="item-action" type="button" disabled={loading || !displayed || displayedNumber + 1 >= pageCount} onClick={() => navigate(displayedNumber + 1)}>{text.itemNext}</button>
-      </div>
+      {tooltipToolsHost && createPortal(<ItemTooltipTools modes={modes} onChange={onModesChange}
+        shortcuts={catalog.tooltipShortcuts ?? pageShortcuts} />, tooltipToolsHost)}
+      {pageCount > 0 && <ItemPagination currentPage={selectedPage} displayedPage={displayedNumber} pageCount={pageCount}
+        disabled={!canNavigate} onStep={movePage} onSelectPage={selectPage} />}
     </>
   );
 }
 
+function ItemPagination({ currentPage, displayedPage = currentPage, pageCount, disabled, onStep, onSelectPage }: {
+  currentPage: number;
+  displayedPage?: number;
+  pageCount: number;
+  disabled?: boolean;
+  onStep: (offset: -1 | 1) => void;
+  onSelectPage: (page: number) => void;
+}) {
+  const { text, language } = usePreferences();
+  const input = useRef<HTMLInputElement>(null);
+  const summary = useId();
+  const format = new Intl.NumberFormat(language);
+
+  useLayoutEffect(() => {
+    if (input.current) input.current.value = String(currentPage + 1);
+  }, [currentPage]);
+
+  return <form className="item-pagination" onSubmit={event => {
+    event.preventDefault();
+    const number = Number(new FormData(event.currentTarget).get('page'));
+    if (!disabled && Number.isSafeInteger(number) && number >= 1 && number <= pageCount) onSelectPage(number - 1);
+  }}>
+    <button className="item-action" data-previous type="button" aria-label={text.itemPrevious} title={text.itemPrevious}
+      disabled={disabled || currentPage === 0} onClick={() => onStep(-1)}><PlayIcon /></button>
+    <div className="item-pagination-page">
+      <input ref={input} type="number" name="page" inputMode="numeric" enterKeyHint="go" min={1} max={pageCount} required
+        aria-label={text.itemPageJump} aria-describedby={summary} defaultValue={currentPage + 1} disabled={disabled} />
+      <span>{text.itemPageTotal(format.format(pageCount))}</span>
+    </div>
+    <button className="item-action" type="button" aria-label={text.itemNext} title={text.itemNext}
+      disabled={disabled || currentPage + 1 >= pageCount} onClick={() => onStep(1)}><PlayIcon /></button>
+    <span className="item-page-announcement" role="status" id={summary}>
+      {text.itemPage(format.format(displayedPage + 1), format.format(pageCount))}
+    </span>
+  </form>;
+}
+
 type AtlasStatus = 'ready' | 'failed';
+
+function catalogSprite(item: CatalogItem, useAtlases: boolean) {
+  return useAtlases && !item.fluidId ? item.sprite : undefined;
+}
 
 function loadAtlas(url: string, onSettled: (status: AtlasStatus) => void) {
   const image = new Image();
@@ -601,6 +817,7 @@ function ItemGrid({ items, useAtlases, highlight, onReady, ...links }: ItemLinkA
 }) {
   const { text } = usePreferences();
   const grid = useRef<HTMLUListElement>(null);
+  const [preloadPage] = useState(() => onReady !== undefined);
   const [seenItems, setSeenItems] = useState<Set<string>>();
   const [atlasStatuses, setAtlasStatuses] = useState(() => new Map<string, AtlasStatus>());
   const [settledImages, setSettledImages] = useState(() => new Set<string>());
@@ -623,7 +840,7 @@ function ItemGrid({ items, useAtlases, highlight, onReady, ...links }: ItemLinkA
         return next;
       });
       for (const item of visibleItems) {
-        const url = useAtlases ? item.sprite?.url : undefined;
+        const url = catalogSprite(item, useAtlases)?.url;
         if (!url || atlasRequests.has(url)) continue;
         atlasRequests.set(url, loadAtlas(url, status => {
           setAtlasStatuses(current => new Map(current).set(url, status));
@@ -631,7 +848,7 @@ function ItemGrid({ items, useAtlases, highlight, onReady, ...links }: ItemLinkA
       }
     }
 
-    const observer = typeof IntersectionObserver === 'undefined' ? undefined : new IntersectionObserver(entries => {
+    const observer = preloadPage || typeof IntersectionObserver === 'undefined' ? undefined : new IntersectionObserver(entries => {
       const visibleItems = [];
       for (const { target, isIntersecting } of entries) {
         if (!isIntersecting) continue;
@@ -650,13 +867,13 @@ function ItemGrid({ items, useAtlases, highlight, onReady, ...links }: ItemLinkA
       observer?.disconnect();
       atlasRequests.forEach(cancel => cancel());
     };
-  }, [items, useAtlases]);
+  }, [items, preloadPage, useAtlases]);
 
   useEffect(() => {
     if (!onReady || !seenItems) return;
     for (const item of items) {
       if (!seenItems.has(item.id) || !item.icon) continue;
-      const sprite = useAtlases ? item.sprite : undefined;
+      const sprite = catalogSprite(item, useAtlases);
       const status = sprite && atlasStatuses.get(sprite.url);
       if (sprite && !status) return;
       if (status !== 'ready' && !settledImages.has(item.icon)) return;
@@ -669,7 +886,7 @@ function ItemGrid({ items, useAtlases, highlight, onReady, ...links }: ItemLinkA
       style={highlight ? { '--item-shortcut-color': highlight.color } as CSSProperties : undefined}>
       {items.map(item => {
         const seen = seenItems?.has(item.id);
-        const sprite = useAtlases ? item.sprite : undefined;
+        const sprite = catalogSprite(item, useAtlases);
         const atlasStatus = seen && sprite ? atlasStatuses.get(sprite.url) : undefined;
         const pending = Boolean(item.icon && (!seen || (sprite && !atlasStatus)));
         const matchesShortcut = highlight?.itemIds.has(item.id);
@@ -690,8 +907,12 @@ function ItemGrid({ items, useAtlases, highlight, onReady, ...links }: ItemLinkA
   );
 }
 
-function ItemDialog({ itemId, preview, catalog, recipeView, modes, onModesChange, onClose, children,
-  ingredient, onOpenIngredient, onCloseIngredient, itemHref, onOpenItem }: ItemNavigation & IngredientNavigation & {
+function ItemDialog({ inline, layoutReady, closing, itemId, preview, catalog, recipeView, modes, onModesChange, onClose, children,
+  ingredient, onOpenIngredient, onCloseIngredient, recipeStation, recipePage, onRecipePositionChange,
+  itemHref, onOpenItem }: ItemNavigation & RecipeNavigation & {
+  inline: boolean;
+  layoutReady: boolean;
+  closing: boolean;
   itemId: string;
   preview?: CatalogItem;
   catalog: Catalog | null;
@@ -706,11 +927,15 @@ function ItemDialog({ itemId, preview, catalog, recipeView, modes, onModesChange
   const sceneContentReady = useSceneContentReady();
   const dialog = useRef<HTMLDialogElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
-  const [modalReady, setModalReady] = useState(false);
+  const toolsId = useId();
+  const { open: toolsOpen, setOpen: setToolsOpen, root: toolsRoot, trigger: toolsTrigger, closeAndFocus: closeTools,
+    onBlur: onToolsBlur, onKeyDown: onToolsKeyDown } = useHeaderDisclosure();
+  const [detailReady, setDetailReady] = useState(false);
   const load = useMemo(() => (signal: AbortSignal) => preview || !catalog
     ? Promise.resolve(preview) : catalog.getItem(itemId, signal), [catalog, preview, itemId]);
   const { state, retry } = useRequest(load);
   const selected = preview ?? (state.status === 'ready' ? state.data : undefined);
+  const itemLoading = !!catalog && !selected && state.status === 'loading';
   const minecraftId = selected?.fluidId ?? selected?.id;
   const recipeLabel = recipeView === 'uses' ? text.itemRecipeUses : text.itemRecipes;
   const title = catalog && !selected && state.status === 'ready' ? text.itemNotFound
@@ -718,13 +943,32 @@ function ItemDialog({ itemId, preview, catalog, recipeView, modes, onModesChange
   const loadDetails = useMemo(() => () => selected ? loadItemDetails(selected) : Promise.resolve(undefined), [selected]);
   const details = useRequest(loadDetails);
   const data = details.state.status === 'ready' ? details.state.data : undefined;
-  const [variantId, setVariantId] = useState('');
-  const variant = modes.advanced ? data?.variants.find(entry => entry.id === variantId) : undefined;
+  const [selectedVariant, setSelectedVariant] = useState<{ itemId: string; id: string }>();
+  const variant = modes.advanced && selectedVariant?.itemId === itemId
+    ? data?.variants.find(entry => entry.id === selectedVariant.id) : undefined;
   const payloads = variant ? variant.payloads : data?.payloads;
-  const tooltipData = useItemTooltip(selected, payloads ?? null);
+  const catalogShortcuts = catalog?.tooltipShortcuts;
+  const tooltipData = useItemTooltip(selected, catalogShortcuts === undefined ? payloads ?? null : null);
+  const shortcutsReady = !itemLoading && !(selected?.detail && details.state.status === 'loading') && !tooltipData.loading;
+  const [previousHeader, setPreviousHeader] = useState({ title, minecraftId, shortcuts: tooltipData.shortcuts });
+  const visibleTitle = itemLoading ? previousHeader.title : title;
+  const shortcuts = shortcutsReady ? tooltipData.shortcuts : previousHeader.shortcuts;
 
-  function openRecipeItem(nextId: string, view: ItemRecipeView = 'recipes') {
-    if (nextId !== itemId || view !== recipeView) onOpenItem(nextId, view);
+  useLayoutEffect(() => setSelectedVariant(undefined), [itemId]);
+
+  useLayoutEffect(() => {
+    setPreviousHeader(current => ({
+      title: itemLoading ? current.title : title,
+      minecraftId: itemLoading ? current.minecraftId : minecraftId,
+      shortcuts: shortcutsReady ? tooltipData.shortcuts : current.shortcuts,
+    }));
+  }, [itemLoading, title, minecraftId, shortcutsReady, tooltipData.shortcuts]);
+
+  function openRecipeItem(nextId: string, view: ItemRecipeView = 'recipes', preview?: CatalogItem) {
+    if (nextId !== itemId || view !== recipeView) {
+      heading.current?.focus({ preventScroll: true });
+      onOpenItem(nextId, view, preview);
+    }
     else if (ingredient) onCloseIngredient();
     else heading.current?.focus({ preventScroll: true });
   }
@@ -741,41 +985,75 @@ function ItemDialog({ itemId, preview, catalog, recipeView, modes, onModesChange
 
   useLayoutEffect(() => {
     const element = dialog.current;
-    if (!sceneContentReady || !element) return;
-    element.showModal();
-    setModalReady(true);
-    return () => element.close();
-  }, [sceneContentReady]);
+    if (!sceneContentReady || !layoutReady || !element) return;
+    if (inline) element.setAttribute('open', '');
+    else element.showModal();
+    const arrival = animateItemArrival(element.querySelector<HTMLElement>('.item-recipe-detail'));
+    setDetailReady(true);
+    return () => {
+      arrival?.cancel();
+      if (inline) element.removeAttribute('open');
+      else element.close();
+    };
+  }, [inline, layoutReady, sceneContentReady]);
 
   return (
-    <dialog className="item-detail-overlay" ref={dialog} aria-label={selected && !selected.fluidId ? `${title} · ${selected.name}` : title}
+    <dialog className="item-detail-overlay" data-inline={inline || undefined} inert={closing} role={inline ? 'region' : undefined}
+      ref={dialog} aria-label={plainMinecraftText(selected && !selected.fluidId ? `${visibleTitle} · ${selected.name}` : visibleTitle)}
       onCancel={event => { event.preventDefault(); onClose(); }}>
       <div className="item-detail item-recipe-detail">
         <div className="item-detail-heading">
-          <h2 ref={heading} tabIndex={-1}>{title}</h2>
+          <h2 ref={heading} tabIndex={-1}><MinecraftItemText text={visibleTitle} /></h2>
           <div className="item-detail-heading-actions">
-            {minecraftId && <button className="item-action item-detail-copy" type="button"
+            {(minecraftId || (itemLoading && previousHeader.minecraftId)) && <button className="item-action item-detail-copy" type="button" disabled={!minecraftId}
               onClick={copyMinecraftId} aria-label={text.copyItemId} title={text.copyItemId}>
               <img src={copyIcon} width={22} height={22} alt="" />
             </button>}
+            <div className="item-detail-tools-disclosure" ref={toolsRoot} onBlur={onToolsBlur} onKeyDown={onToolsKeyDown}>
+              <button className="item-action item-detail-tools-toggle" type="button" ref={toolsTrigger}
+                aria-label={text.itemTooltipModes} title={text.itemTooltipModes} aria-expanded={toolsOpen} aria-controls={toolsId}
+                onClick={() => setToolsOpen(open => !open)}>
+                <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true">
+                  <rect x="2" y="4.5" width="16" height="11" rx="1" />
+                  <path d="M5 8h2m2 0h2m2 0h2m-10 3h2m2 0h6" />
+                </svg>
+              </button>
+              <div className="item-detail-tools-float" id={toolsId} data-open={toolsOpen || undefined}>
+                <ItemTooltipTools modes={modes} onChange={next => {
+                  onModesChange(next);
+                  if (toolsOpen) closeTools();
+                }} shortcuts={catalogShortcuts ?? shortcuts} />
+              </div>
+            </div>
             <button className="item-action item-detail-close" type="button" onClick={onClose} aria-label={text.close}>×</button>
           </div>
         </div>
-        {sceneContentReady && modalReady && (!catalog ? children : selected ? (
-          selected.detail && details.state.status === 'loading' ? <p role="status">{text.itemDetailsLoading}</p> :
+        {sceneContentReady && detailReady && (!catalog ? children : selected ? (
+          selected.detail && details.state.status === 'loading' ? <ItemDetailsLoading key={itemId} /> :
             details.state.status === 'error' ? <ItemRequestError retry={details.retry} /> :
-              <ItemDetails item={selected} data={data} variant={variant} onVariantChange={setVariantId}
-                catalog={catalog} modes={modes} stackUrl={tooltipData.stackUrl} itemHref={itemHref} onOpenItem={openRecipeItem}
+              <ItemDetails key={itemId} item={selected} data={data} variant={variant}
+                onVariantChange={id => setSelectedVariant({ itemId, id })}
+                catalog={catalog} modes={modes} stackUrl={payloads?.stack} itemHref={itemHref} onOpenItem={openRecipeItem}
                 ingredient={ingredient} onCloseIngredient={onCloseIngredient} onOpenIngredient={onOpenIngredient}
+                recipeStation={recipeStation} recipePage={recipePage} onRecipePositionChange={onRecipePositionChange}
                 recipeView={recipeView} recipeLabel={recipeLabel} />
         ) : (
           state.status === 'error' ? <ItemRequestError retry={retry} /> :
-            state.status === 'loading' && <p role="status">{text.itemDetailsLoading}</p>
+            state.status === 'loading' && <ItemDetailsLoading key={itemId} />
         ))}
       </div>
-      <ItemTooltipTools modes={modes} onChange={onModesChange} shortcuts={tooltipData.shortcuts} />
     </dialog>
   );
+}
+
+function ItemDetailsLoading() {
+  const { text } = usePreferences();
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setVisible(true), itemDetailsLoadingDelayMs);
+    return () => window.clearTimeout(timer);
+  }, []);
+  return visible ? <p role="status">{text.itemDetailsLoading}</p> : null;
 }
 
 function ItemRequestError({ retry }: { retry: () => void }) {
@@ -786,8 +1064,61 @@ function ItemRequestError({ retry }: { retry: () => void }) {
   </div>;
 }
 
-type RecipeCatalog = ItemNavigation & IngredientNavigation & { catalog: Catalog; item: CatalogItem; modes: TooltipModes };
+type RecipeCatalog = ItemNavigation & RecipeNavigation & { catalog: Catalog; item: CatalogItem; modes: TooltipModes };
 type IngredientSelection = { input: RecipeIngredient; findItem: (id: string) => CatalogItem | undefined };
+type MachineOptions = { alternatives: MachineIngredient[]; fluidIcon: (ingredient: MachineIngredient) => string | undefined };
+
+function machineIngredient({ alternatives, otherIngredients, alternativesTruncated }: MachineRecipeSlot): RecipeIngredient {
+  return {
+    items: alternatives.filter(option => option.kind === 'item').map(option => option.id),
+    tags: [], custom: otherIngredients, truncated: alternativesTruncated,
+  };
+}
+
+function machineOptions(slot: MachineRecipeSlot, item: CatalogItem, getIcon: Catalog['getIcon']): MachineOptions {
+  return {
+    alternatives: slot.alternatives,
+    fluidIcon: ({ id, icon }) => (icon && getIcon?.(icon)) || (id === item.fluidId ? item.icon : undefined),
+  };
+}
+
+type IngredientOption = MachineIngredient | { id: string; kind: 'item'; amount?: undefined };
+
+function fluidCatalogAlias(id: string) {
+  return id.replace(':', ':/fluids/');
+}
+
+function addIngredientLookups(ids: Set<string>, options: readonly IngredientOption[]) {
+  for (const { id, kind } of options) {
+    ids.add(id);
+    if (kind === 'fluid') ids.add(fluidCatalogAlias(id));
+  }
+}
+
+function findIngredientItem({ id, kind }: IngredientOption, findItem: IngredientSelection['findItem']) {
+  const item = findItem(id);
+  if (kind === 'item') return item?.fluidId ? undefined : item;
+  if (item?.fluidId === id) return item;
+  const alias = findItem(fluidCatalogAlias(id));
+  return alias?.fluidId === id ? alias : undefined;
+}
+
+function ingredientOptions(input: RecipeIngredient, alternatives?: MachineIngredient[]): IngredientOption[] {
+  return alternatives ?? input.items.map(id => ({ id, kind: 'item' }));
+}
+
+function formatFluidAmount(millibuckets: number) {
+  const digits = String(millibuckets).padStart(4, '0');
+  const fraction = digits.slice(-3).replace(/0+$/, '');
+  return digits.slice(0, -3) + (fraction ? `.${fraction}` : '');
+}
+
+function ingredientOptionName(option: IngredientOption, item?: CatalogItem) {
+  const { id, kind, amount } = option;
+  if (kind === 'fluid') return `${item?.name ?? option.name ?? id} · ${formatFluidAmount(amount)}`;
+  const name = item?.name ?? id;
+  return amount === undefined ? name : `${amount} × ${name}`;
+}
 
 function ItemDetails({ item, data, variant, onVariantChange, catalog, modes, stackUrl, recipeView, recipeLabel,
   ...navigation }: RecipeCatalog & {
@@ -798,16 +1129,31 @@ function ItemDetails({ item, data, variant, onVariantChange, catalog, modes, sta
   recipeView: ItemRecipeView;
   recipeLabel: string;
 }) {
-  const { text } = usePreferences();
+  const { text, language } = usePreferences();
   const variants = data?.variants ?? [];
   const legacyRecipes = useMemo(() => data?.recipes && readLegacyRecipes(data.recipes, item.id), [data?.recipes, item.id]);
   const recipeCatalog = { item, catalog, modes, ...navigation };
+  const { id, fluidId } = item;
+  const loadUses = useMemo(() => (signal: AbortSignal) =>
+    catalog.getRecipeUses?.(fluidId ?? id, signal, fluidId ? 'fluid' : undefined) ?? Promise.resolve(undefined), [catalog, fluidId, id]);
+  const showUses = recipeView === 'uses';
+  const uses = useRequest(loadUses, showUses && !!catalog.getRecipeUses);
+  const usesData = showUses && uses.state.status === 'ready' ? uses.state.data : undefined;
+  const publishedAt = usesData?.publishedAt ?? catalog.publishedAt;
+  const recipes = data?.recipeFeed ? (
+    <PayloadContent url={data.recipeFeed} render={feed => <RecipeTabs feed={feed} {...recipeCatalog} />} />
+  ) : <RecipeTabs recipes={legacyRecipes} emptyLabel={legacyRecipes ? undefined : text.itemRecipesUnavailable} {...recipeCatalog} />;
+  let content = recipes;
+  if (showUses) {
+    if (!catalog.getRecipeUses) content = <RecipeTabs emptyLabel={text.itemRecipesUnavailable} {...recipeCatalog} />;
+    else if (uses.state.status === 'loading') content = <ItemDetailsLoading />;
+    else if (uses.state.status === 'error') content = <ItemRequestError retry={uses.retry} />;
+    else content = <RecipeTabs feed={usesData?.feed} emptyLabel={text.itemNoRecipeUses} {...recipeCatalog} />;
+  }
   return (
     <>
       <div className="item-detail-section" data-section="recipes" key={recipeView} role="region" aria-label={recipeLabel} tabIndex={0}>
-        {recipeView === 'uses' ? <ItemRecipeUses {...recipeCatalog} /> : data?.recipeFeed ? (
-          <PayloadContent url={data.recipeFeed} render={feed => <RecipeTabs feed={feed} {...recipeCatalog} />} />
-        ) : <RecipeTabs recipes={legacyRecipes} emptyLabel={legacyRecipes ? undefined : text.itemRecipesUnavailable} {...recipeCatalog} />}
+        {content}
       </div>
       {modes.advanced && variants.length > 0 && (
         <div className="item-variants item-picker">
@@ -820,6 +1166,11 @@ function ItemDetails({ item, data, variant, onVariantChange, catalog, modes, sta
       {modes.advanced && stackUrl && <ItemPayload label={text.itemStackData}>
         <PayloadContent url={stackUrl} render={data => <pre>{JSON.stringify(data, null, 2)}</pre>} />
       </ItemPayload>}
+      {publishedAt !== undefined && <p className="item-recipe-published">
+        {text.itemRecipePublished} <time dateTime={new Date(publishedAt).toISOString()}>
+          {new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'short' }).format(publishedAt)}
+        </time>
+      </p>}
     </>
   );
 }
@@ -840,27 +1191,19 @@ function ItemPayload({ label, children }: { label: string; children: ReactNode }
 }
 
 function PayloadContent({ url, render }: { url: string; render: (data: unknown) => ReactNode }) {
-  const { text } = usePreferences();
   const load = useMemo(() => (signal: AbortSignal) => loadItemPayload(url, signal), [url]);
   const { state, retry } = useRequest(load);
-  if (state.status === 'loading') return <p role="status">{text.itemDetailsLoading}</p>;
+  if (state.status === 'loading') return <ItemDetailsLoading />;
   if (state.status === 'error') return <ItemRequestError retry={retry} />;
   return render(state.data);
 }
 
-function ItemRecipeUses(recipeCatalog: RecipeCatalog) {
-  const { text } = usePreferences();
-  const { catalog, item } = recipeCatalog;
-  const load = useMemo(() => (signal: AbortSignal) => catalog.getRecipeUses?.(item.id, signal) ?? Promise.resolve(undefined), [catalog, item.id]);
-  const { state, retry } = useRequest(load);
-  if (!catalog.getRecipeUses) return <RecipeTabs emptyLabel={text.itemRecipesUnavailable} {...recipeCatalog} />;
-  if (state.status === 'loading') return <p role="status">{text.itemDetailsLoading}</p>;
-  if (state.status === 'error') return <ItemRequestError retry={retry} />;
-  return <RecipeTabs feed={state.data} emptyLabel={text.itemNoRecipeUses} {...recipeCatalog} />;
+function recipeStationIconId(station: string) {
+  return station === 'immersiveengineering:bottling_buckets' ? 'minecraft:bucket' : station;
 }
 
 function RecipeTabs({ recipes, feed, emptyLabel, item, catalog, modes, itemHref, onOpenItem,
-  ingredient, onOpenIngredient, onCloseIngredient }: RecipeCatalog & {
+  ingredient, onOpenIngredient, onCloseIngredient, recipeStation, recipePage, onRecipePositionChange }: RecipeCatalog & {
   recipes?: RecipeEntry[];
   feed?: unknown;
   emptyLabel?: string;
@@ -869,6 +1212,7 @@ function RecipeTabs({ recipes, feed, emptyLabel, item, catalog, modes, itemHref,
   const id = useId();
   const tooltipId = useId();
   const tabStrip = useRef<HTMLDivElement>(null);
+  const activePanel = useRef<HTMLDivElement>(null);
   const [tabScroll, setTabScroll] = useState({ overflow: false, previous: false, next: false });
   const [hovered, setHovered] = useState<TooltipTarget<HTMLAnchorElement> & { item: CatalogItem }>();
   const hideTooltip = useCallback((anchor?: HTMLElement) => {
@@ -924,19 +1268,36 @@ function RecipeTabs({ recipes, feed, emptyLabel, item, catalog, modes, itemHref,
       : starts.find(start => start > position + 1) ?? strip.scrollWidth;
     strip.scrollTo({ left: target });
   }
-  const ingredientGroup = groups.find(group => ingredient && group.recipes.some(recipe => recipe.id === ingredient.recipe && recipe.instructions));
-  const ingredientRecipe = ingredientGroup?.recipes.find(recipe => recipe.id === ingredient?.recipe && recipe.instructions);
-  const input = ingredient && ingredientRecipe?.instructions?.inputs[ingredient.slot];
-  const [station, setStation] = useState(ingredientGroup?.station);
+  const requestedGroup = groups.find(group => group.station === recipeStation);
+  const containsIngredient = (group: { recipes: RecipeEntry[] }) => ingredient && group.recipes.some(recipe => recipe.id === ingredient.recipe);
+  const ingredientGroup = requestedGroup && containsIngredient(requestedGroup) ? requestedGroup : groups.find(containsIngredient);
+  const ingredientRecipe = ingredientGroup?.recipes.find(recipe => recipe.id === ingredient?.recipe);
+  const ingredientSlot = ingredient && ingredientRecipe?.machine?.slots[ingredient.slot];
+  const machineInput = useMemo(() => ingredientSlot && machineIngredient(ingredientSlot), [ingredientSlot]);
+  const input = machineInput ?? (ingredient && ingredientRecipe?.instructions?.inputs[ingredient.slot]);
   const loadStations = useCallback((signal: AbortSignal) => {
-    const ids = new Set(groups.map(group => group.station).filter(isItemId));
+    const ids = new Set(groups.map(({ station }) => recipeStationIconId(station)).filter(isItemId));
     ids.delete(item.id);
     return catalog.getItems(ids, signal);
   }, [catalog, groups, item.id]);
   const { state: stations } = useRequest(loadStations);
   const findStation = (id: string) => id === item.id ? item : stations.status === 'ready' ? stations.data.get(id) : undefined;
-  const active = groups.findIndex(group => group.station === station);
-  const selected = Math.max(active, 0);
+  const group = ingredientGroup ?? requestedGroup ?? groups[0];
+  const selected = group ? groups.indexOf(group) : 0;
+  const activeStation = group?.station;
+  const pageCount = Math.ceil((group?.recipes.length ?? 0) / recipesPerPage);
+  const savedPage = requestedGroup || recipeStation === undefined ? recipePage ?? 0 : 0;
+  const selectedPage = ingredientRecipe && ingredientGroup
+    ? Math.floor(ingredientGroup.recipes.indexOf(ingredientRecipe) / recipesPerPage) : savedPage;
+  const currentPage = Math.max(0, Math.min(selectedPage, pageCount - 1));
+  const previousTab = useRef(selected);
+  useLayoutEffect(() => {
+    const previous = previousTab.current;
+    previousTab.current = selected;
+    if (previous === selected) return;
+    const arrival = animateItemArrival(activePanel.current, selected > previous ? 1 : -1);
+    return () => arrival?.cancel();
+  }, [selected]);
   useLayoutEffect(() => {
     const strip = tabStrip.current;
     const tab = strip?.children[selected];
@@ -952,89 +1313,102 @@ function RecipeTabs({ recipes, feed, emptyLabel, item, catalog, modes, itemHref,
     hideTooltip,
     description: hovered && { ...hovered, id: tooltipId },
   };
-  const activeStation = groups[selected]?.station;
   const stationItem = activeStation === undefined ? undefined : findStation(activeStation);
   const showStationSlot = !!stationItem || (isItemId(activeStation) && stations.status === 'loading');
   const tooltip = hovered && <ItemTooltip key={hovered.item.id} id={tooltipId} modes={modes} data={tooltipData}
     onDismiss={links.hideTooltip} {...hovered} />;
 
+  function resetRecipeScroll() {
+    activePanel.current?.parentElement?.scrollTo(0, 0);
+    tabStrip.current?.closest('.item-detail-section')?.scrollTo(0, 0);
+  }
+
+  function changePage(nextPage: number) {
+    links.hideTooltip();
+    if (activeStation !== undefined) onRecipePositionChange(activeStation, nextPage);
+    resetRecipeScroll();
+  }
+
   return <>
     {!groups.length && <p>{emptyLabel ?? text.itemNoRecipes}</p>}
-    {!!groups.length && <div className="item-recipe-tab-bar">
-      {tabScroll.overflow && <button className="item-action item-recipe-tab-arrow" type="button"
-        aria-label={text.itemRecipePreviousStationTabs} aria-controls={`${id}-tabs`} disabled={!tabScroll.previous}
-        onClick={() => scrollTabs('previous')}>←</button>}
-      <div className="item-recipe-tabs" role="tablist" aria-label={text.itemRecipes} id={`${id}-tabs`}
-        ref={tabStrip} onScroll={updateTabScroll}>
-        {groups.map(({ station, recipes }, index) => {
-          const known = recipeStations.find(key => key === station);
-          const preview = findStation(station);
-          const category = recipes.find(recipe => recipe.machine?.category === station)?.machine;
-          const label = known ? text.itemRecipeStations[known] : preview?.name ?? category?.title ?? (station || text.itemRecipeOther);
-          const showIcon = preview?.icon || (isItemId(station) && stations.status === 'loading');
-          return <button key={station} id={`${id}-tab-${index}`} type="button" className="item-action" role="tab"
-            aria-label={label} title={label}
-            aria-selected={index === selected} aria-controls={`${id}-panel-${index}`} tabIndex={index === selected ? 0 : -1}
-            onClick={event => {
-              links.hideTooltip();
-              setStation(station);
-              event.currentTarget.closest('.item-detail-section')?.scrollTo(0, 0);
-            }}
-            onKeyDown={event => {
-              const tabs = event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]');
-              if (!tabs) return;
-              const last = tabs.length - 1;
-              let next: number;
-              switch (event.key) {
-                case 'ArrowLeft': next = index > 0 ? index - 1 : last; break;
-                case 'ArrowRight': next = index < last ? index + 1 : 0; break;
-                case 'Home': next = 0; break;
-                case 'End': next = last; break;
-                default: return;
-              }
-              event.preventDefault();
-              tabs[next].focus();
-            }}>
-            {showIcon ? <ItemIcon icon={preview?.icon} pending={!preview?.icon} /> : <span className="item-recipe-tab-label">{label}</span>}
-          </button>;
-        })}
+    {!!groups.length && <div className="item-recipe-navigation">
+      {pageCount > 0 && <ItemPagination key={activeStation} currentPage={currentPage} pageCount={pageCount}
+        disabled={pageCount === 1} onSelectPage={changePage}
+        onStep={offset => changePage(currentPage + offset)} />}
+      <div className="item-recipe-tab-bar">
+        {tabScroll.overflow && <button className="item-action item-recipe-tab-arrow" data-previous type="button"
+          aria-label={text.itemRecipePreviousStationTabs} aria-controls={`${id}-tabs`} disabled={!tabScroll.previous}
+          onClick={() => scrollTabs('previous')}><PlayIcon /></button>}
+        <div className="item-recipe-tabs" role="tablist" aria-label={text.itemRecipes} id={`${id}-tabs`}
+          ref={tabStrip} onScroll={updateTabScroll}>
+          {groups.map(({ station, recipes }, index) => {
+            const known = recipeStations.find(key => key === station);
+            const preview = findStation(recipeStationIconId(station));
+            const category = recipes.find(recipe => recipe.machine?.category === station)?.machine;
+            const label = known ? text.itemRecipeStations[known] : findStation(station)?.name ?? category?.title ?? (station || text.itemRecipeOther);
+            const showIcon = preview?.icon || (isItemId(station) && stations.status === 'loading');
+            return <button key={station} id={`${id}-tab-${index}`} type="button" className="item-action" role="tab"
+              aria-label={label} title={label}
+              aria-selected={index === selected} aria-controls={`${id}-panel-${index}`} tabIndex={index === selected ? 0 : -1}
+              onClick={() => {
+                links.hideTooltip();
+                if (index !== selected) onRecipePositionChange(station);
+                resetRecipeScroll();
+              }}
+              onKeyDown={event => {
+                const tabs = event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]');
+                if (!tabs) return;
+                const last = tabs.length - 1;
+                let next: number;
+                switch (event.key) {
+                  case 'ArrowLeft': next = index > 0 ? index - 1 : last; break;
+                  case 'ArrowRight': next = index < last ? index + 1 : 0; break;
+                  case 'Home': next = 0; break;
+                  case 'End': next = last; break;
+                  default: return;
+                }
+                event.preventDefault();
+                tabs[next].focus();
+              }}>
+              {showIcon ? <ItemIcon icon={preview?.icon} pending={!preview?.icon} /> : <span className="item-recipe-tab-label">{label}</span>}
+            </button>;
+          })}
+        </div>
+        {tabScroll.overflow && <button className="item-action item-recipe-tab-arrow" type="button"
+          aria-label={text.itemRecipeNextStationTabs} aria-controls={`${id}-tabs`} disabled={!tabScroll.next}
+          onClick={() => scrollTabs('next')}><PlayIcon /></button>}
       </div>
-      {tabScroll.overflow && <button className="item-action item-recipe-tab-arrow" type="button"
-        aria-label={text.itemRecipeNextStationTabs} aria-controls={`${id}-tabs`} disabled={!tabScroll.next}
-        onClick={() => scrollTabs('next')}>→</button>}
     </div>}
     {groups.map(({ station, recipes }, index) => (
-      <div key={station} id={`${id}-panel-${index}`} role="tabpanel" aria-labelledby={`${id}-tab-${index}`}
+      <div className="item-recipe-tab-panel" key={station} id={`${id}-panel-${index}`} role="tabpanel" aria-labelledby={`${id}-tab-${index}`}
         tabIndex={index === selected ? 0 : undefined} hidden={index !== selected}>
-        {index === selected && <div className="item-recipe-panel">
+        {index === selected && <div className="item-recipe-panel" ref={activePanel}>
           {showStationSlot && <div className="item-recipe-station item-recipe-slot">
             {stationItem && <RecipeIcon item={stationItem} id={stationItem.id}
               label={text.itemRecipeMakeStation(stationItem.name)} links={links} />}
           </div>}
-          <RecipeGroup recipes={recipes} item={item} catalog={catalog} links={links}
-            initialRecipe={ingredientRecipe} onOpenIngredient={onOpenIngredient} />
+          <RecipeGroup key={currentPage} recipes={recipes} page={currentPage} item={item} catalog={catalog} links={links}
+            panel={activePanel} onOpenIngredient={onOpenIngredient} />
         </div>}
       </div>
     ))}
-    {ingredient ? <RecipeIngredientDialog input={input || undefined} item={item} catalog={catalog}
+    {ingredient ? <RecipeIngredientDialog key={`${ingredient.recipe}@${ingredient.slot}`} input={input || undefined} item={item} catalog={catalog}
+      options={ingredientSlot && machineOptions(ingredientSlot, item, catalog.getIcon)}
       onClose={() => { links.hideTooltip(); onCloseIngredient(); }} links={links}>
       {tooltip}
     </RecipeIngredientDialog> : tooltip}
   </>;
 }
 
-function RecipeGroup({ recipes, item, catalog, links, initialRecipe, onOpenIngredient }: Pick<RecipeCatalog, 'item' | 'catalog' | 'onOpenIngredient'> & {
+function RecipeGroup({ recipes, page, item, catalog, links, panel, onOpenIngredient }: Pick<RecipeCatalog, 'item' | 'catalog' | 'onOpenIngredient'> & {
   recipes: RecipeEntry[];
+  page: number;
   links: ItemLinkActions;
-  initialRecipe?: RecipeEntry;
+  panel: RefObject<HTMLDivElement | null>;
 }) {
   const { text } = usePreferences();
-  const results = useRef<HTMLDivElement>(null);
-  const [page, setPage] = useState(() => initialRecipe ? Math.max(0, Math.floor(recipes.indexOf(initialRecipe) / recipesPerPage)) : 0);
   const [rotation, setRotation] = useState(0);
-  const pageCount = Math.ceil(recipes.length / recipesPerPage);
-  const currentPage = Math.min(page, pageCount - 1);
-  const first = currentPage * recipesPerPage;
+  const first = page * recipesPerPage;
   const visibleRecipes = useMemo(() => recipes.slice(first, first + recipesPerPage), [recipes, first]);
   const load = useMemo(() => (signal: AbortSignal) => {
     const ids = new Set<string>();
@@ -1044,9 +1418,7 @@ function RecipeGroup({ recipes, item, catalog, links, initialRecipe, onOpenIngre
         for (const input of instructions.inputs) input?.items.forEach(id => ids.add(id));
       }
       for (const slot of machine?.slots ?? []) {
-        for (const ingredient of slot.alternatives) {
-          if (ingredient.kind === 'item') ids.add(ingredient.id);
-        }
+        addIngredientLookups(ids, slot.alternatives);
       }
     }
     ids.delete(item.id);
@@ -1055,71 +1427,66 @@ function RecipeGroup({ recipes, item, catalog, links, initialRecipe, onOpenIngre
   const { state, retry } = useRequest(load);
   const findItem = (id: string) => id === item.id ? item : state.status === 'ready' ? state.data.get(id) : undefined;
   const rotates = state.status === 'ready' && visibleRecipes.some(
-    recipe => recipe.instructions?.inputs.some(input => input && input.items.length > 1),
+    recipe => recipe.instructions?.inputs.some(input => input && input.items.length > 1)
+      || recipe.machine?.slots.some(slot => slot.bounds && slot.alternatives.length > 1),
   );
 
   useEffect(() => {
     if (!rotates) return;
     const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
     const timer = window.setInterval(() => {
-      if (!motion.matches && !results.current?.querySelector('.item-recipe-ingredient:is(:hover, :focus-within, :active, [aria-describedby])')) {
-        setRotation(current => current + 1);
-      }
+      if (motion.matches || panel.current?.querySelector(
+        '.item-recipe-slot:hover, .item-recipe-ingredient:is(:focus-within, :active, [aria-describedby])',
+      )) return;
+      setRotation(current => current + 1);
     }, ingredientRotationMs);
     return () => window.clearInterval(timer);
-  }, [rotates]);
+  }, [panel, rotates]);
 
-  function changePage(nextPage: number, button: HTMLButtonElement) {
-    links.hideTooltip();
-    setPage(nextPage);
-    setRotation(0);
-    button.closest('.item-detail-section')?.scrollTo(0, 0);
-  }
-
-  return <div className="item-recipe-results" ref={results}>
-    {pageCount > 1 && <div className="item-recipe-pagination">
-      <button className="item-action" type="button" aria-label={text.itemPrevious} disabled={currentPage === 0}
-        onClick={event => changePage(currentPage - 1, event.currentTarget)}>←</button>
-      <span role="status">{currentPage + 1} / {pageCount}</span>
-      <button className="item-action" type="button" aria-label={text.itemNext} disabled={currentPage === pageCount - 1}
-        onClick={event => changePage(currentPage + 1, event.currentTarget)}>→</button>
-    </div>}
-    {state.status === 'loading' ? <p role="status">{text.itemDetailsLoading}</p> :
+  return <div className="item-recipe-results">
+    {state.status === 'loading' ? <ItemDetailsLoading /> :
       state.status === 'error' ? <ItemRequestError retry={retry} /> :
         <ul>
-          {visibleRecipes.map(({ id, instructions, type, machine }, index) => (
-            <li className="item-recipe" key={first + index}>
-              {machine ? <MachineRecipeCard recipe={machine} item={item} findItem={findItem} links={links} />
+          {visibleRecipes.map(({ id, instructions, type, machine }, index) => {
+            const openIngredient = (slot: number) => { links.hideTooltip(); onOpenIngredient({ recipe: id, slot }); };
+            return <li className="item-recipe" key={first + index}>
+              {machine ? <MachineRecipeCard recipe={machine} item={item} findItem={findItem} getIcon={catalog.getIcon}
+                links={links} rotation={rotation} onOpenIngredient={openIngredient} />
                 : instructions ? <Recipe instructions={instructions} findItem={findItem} links={links}
-                rotation={rotation} onOpenIngredient={slot => { links.hideTooltip(); onOpenIngredient({ recipe: id, slot }); }} /> : <>
+                rotation={rotation} onOpenIngredient={openIngredient} /> : <>
                 {type && <strong>{type}</strong>}
                 <p>{text.itemRecipeUnsupported}</p>
               </>}
-            </li>
-          ))}
+            </li>;
+          })}
         </ul>}
   </div>;
 }
 
-function MachineRecipeCard({ recipe: { title, frame, slots }, item, findItem, links }: {
+function MachineRecipeCard({ recipe: { title, frame, slotSize, slots }, item, findItem, getIcon, links, rotation, onOpenIngredient }: {
   recipe: MachineRecipe;
   item: CatalogItem;
   findItem: IngredientSelection['findItem'];
+  getIcon: Catalog['getIcon'];
   links: ItemLinkActions;
+  rotation: number;
+  onOpenIngredient: (slot: number) => void;
 }) {
   const { text } = usePreferences();
   const hasLayout = slots.some(slot => slot.bounds);
   const details = slots.filter(({ bounds, alternatives, otherIngredients, alternativesTruncated }) =>
-    (!bounds && (alternatives.length > 0 || otherIngredients)) || alternatives.length > 1
-      || (alternatives.length > 0 && otherIngredients) || alternativesTruncated,
+    !bounds && (alternatives.length > 0 || otherIngredients || alternativesTruncated),
   );
 
   return <>
     {hasLayout && <div className="item-machine-recipe" role="group" aria-label={title}
-      style={{ inlineSize: frame.width * 2.5, aspectRatio: `${frame.width} / ${frame.height}` }}>
-      {slots.map(({ bounds, role, alternatives, otherIngredients }, index) => {
+      style={{ inlineSize: `calc(var(--item-recipe-slot-size) * ${frame.width / slotSize})`, aspectRatio: `${frame.width} / ${frame.height}` }}>
+      {slots.map((slot, index) => {
+        const { bounds, role, alternatives, otherIngredients, alternativesTruncated } = slot;
         if (!bounds) return null;
         const ingredient = alternatives[0];
+        const grouped = alternatives.length > 1 || alternativesTruncated || (ingredient && otherIngredients);
+        const fluid = !grouped && ingredient?.kind === 'fluid';
         const style = {
           insetInlineStart: `${100 * (bounds.x - frame.x) / frame.width}%`,
           insetBlockStart: `${100 * (bounds.y - frame.y) / frame.height}%`,
@@ -1127,20 +1494,18 @@ function MachineRecipeCard({ recipe: { title, frame, slots }, item, findItem, li
           blockSize: `${100 * bounds.height / frame.height}%`,
         };
         return <div key={index} className="item-recipe-slot item-machine-slot" data-role={role}
-          data-fluid={ingredient?.kind === 'fluid' || undefined} style={style}>
-          {ingredient?.kind === 'item' && <RecipeIcon item={findItem(ingredient.id)} id={ingredient.id}
+          data-fluid={fluid || undefined} style={style}>
+          {grouped && <RecipeInput input={machineIngredient(slot)} options={machineOptions(slot, item, getIcon)}
+            findItem={findItem} links={links} rotation={rotation} onOpenIngredient={() => onOpenIngredient(index)} />}
+          {!grouped && ingredient?.kind === 'item' && <RecipeIcon item={findItem(ingredient.id)} id={ingredient.id}
             count={ingredient.amount} links={links} />}
-          {ingredient?.kind === 'fluid' && <>
-            {ingredient.id === item.fluidId && item.icon && <ItemIcon icon={item.icon} fluid lazy />}
-            <span className="item-machine-fluid" title={`${ingredient.id} · ${ingredient.amount} mB`}>
-              {ingredient.amount}<small> mB</small>
-            </span>
-          </>}
-          {!ingredient && otherIngredients && <span title={text.itemRecipeUnknownInput}>?</span>}
+          {fluid && <RecipeFluidIcon ingredient={ingredient} item={findIngredientItem(ingredient, findItem)} links={links}
+            icon={machineOptions(slot, item, getIcon).fluidIcon(ingredient)} />}
+          {!grouped && !ingredient && otherIngredients && <span title={text.itemRecipeUnknownInput}>?</span>}
         </div>;
       })}
     </div>}
-    {details.length > 0 && <details className="item-machine-details" open={!hasLayout || details.some(slot => !slot.bounds) || undefined}>
+    {details.length > 0 && <details className="item-machine-details" open>
       <summary>{text.itemMachineRecipeDetails}</summary>
       {(['input', 'output', 'catalyst'] as const).map(role => {
         const group = details.filter(slot => slot.role === role);
@@ -1150,8 +1515,7 @@ function MachineRecipeCard({ recipe: { title, frame, slots }, item, findItem, li
             {group.map(({ name, alternatives, otherIngredients, alternativesTruncated }, index) => (
               <li key={index}>
                 {name && <strong>{name} · </strong>}
-                {alternatives.map(({ id, kind, amount }) => kind === 'fluid' ? `${id} · ${amount} mB`
-                  : `${amount} × ${findItem(id)?.name ?? id}`).join(' / ')}
+                {alternatives.map(option => ingredientOptionName(option, findIngredientItem(option, findItem))).join(' / ')}
                 {otherIngredients && <p>{text.itemRecipeUnknownInput}</p>}
                 {alternativesTruncated && <p>{text.itemRecipeMoreExamples}</p>}
               </li>
@@ -1171,7 +1535,7 @@ function Recipe({ instructions: { columns, inputs, result }, findItem, links, ro
   onOpenIngredient: (slot: number) => void;
 }) {
   return <div className="item-recipe-body">
-    <ul className="item-recipe-grid" style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 2.5rem))` }}>
+    <ul className="item-recipe-grid" style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, var(--item-recipe-slot-size)))` }}>
       {inputs.map((input, index) => (
         <li className="item-recipe-slot" key={index} aria-hidden={!input || undefined}>
           {input && <RecipeInput input={input} findItem={findItem} rotation={rotation}
@@ -1186,7 +1550,8 @@ function Recipe({ instructions: { columns, inputs, result }, findItem, links, ro
   </div>;
 }
 
-function RecipeInput({ input, findItem, rotation, links, onOpenIngredient }: IngredientSelection & {
+function RecipeInput({ input, options, findItem, rotation, links, onOpenIngredient }: IngredientSelection & {
+  options?: MachineOptions;
   rotation: number;
   links: ItemLinkActions;
   onOpenIngredient: () => void;
@@ -1200,17 +1565,34 @@ function RecipeInput({ input, findItem, rotation, links, onOpenIngredient }: Ing
   const tooltip = useTooltipTrigger<HTMLButtonElement>(target, setTarget, hideIngredientTooltip);
   const { items, tags, custom, truncated } = input;
   const first = items[0];
-  const single = items.length === 1 && !custom && !truncated ? findItem(first) : undefined;
-  if (single && !tags.length) {
-    return <RecipeIcon item={single} id={first} links={links} />;
+  if (!options && items.length === 1 && !custom && !truncated) {
+    return <RecipeIcon item={findItem(first)} id={first} links={links} />;
   }
 
-  const previews = items.map(findItem).filter(item => item?.icon);
-  const preview = single ?? (previews.length ? previews[rotation % previews.length] : undefined);
+  const variants = ingredientOptions(input, options?.alternatives);
+  const previews = variants.map(option => {
+    const item = findIngredientItem(option, findItem);
+    const icon = (option.kind === 'fluid' && options?.fluidIcon(option)) || item?.icon;
+    return { option, item, icon };
+  }).filter(({ icon, option }) => icon || option.kind === 'fluid');
+  const current = previews.length ? previews[rotation % previews.length] : undefined;
+  const previous = rotation && previews.length > 1 ? previews[(rotation - 1) % previews.length] : undefined;
+  const preview = current?.item;
   const tagLabels = tags.map(tag => `#${tag}`).join(', ');
   const label = tagLabels ? `${text.itemRecipeAlternatives} · ${tagLabels}` : text.itemRecipeAlternatives;
+  function renderPreview(variant: typeof current, slide?: 'in' | 'out') {
+    return <span className="item-recipe-preview" key={slide === 'out' ? rotation - 1 : rotation} data-slide={slide}>
+      <ItemIcon icon={variant?.icon} bar={variant?.item?.bar} fluid={variant?.option.kind === 'fluid'} />
+      {variant?.option.amount !== undefined && <span className="item-recipe-count">
+        {variant.option.kind === 'fluid' ? formatFluidAmount(variant.option.amount) : variant.option.amount}
+      </span>}
+    </span>;
+  }
   const content = <>
-    <ItemIcon icon={preview?.icon} bar={preview?.bar} />
+    <span className="item-recipe-previews" aria-hidden="true">
+      {renderPreview(current, previous ? 'in' : undefined)}
+      {previous && renderPreview(previous, 'out')}
+    </span>
     <span className="item-recipe-ingredient-mark" aria-hidden="true">{tags.length ? '#' : '…'}</span>
   </>;
 
@@ -1220,11 +1602,8 @@ function RecipeInput({ input, findItem, rotation, links, onOpenIngredient }: Ing
   }
 
   return <>
-    {single ? <ItemLink {...links} item={single} label={`${single.name} · ${tagLabels}`}
-      description={target ? { ...target, id: tooltipId } : undefined}
-      showTooltip={(_item, target) => setTarget(target)} hideTooltip={hideIngredientTooltip}>
-      {content}
-    </ItemLink> : <button className="item-slot-button item-recipe-ingredient" type="button" aria-label={label} aria-haspopup="dialog"
+    <button className="item-slot-button item-recipe-ingredient" type="button" aria-label={label} aria-haspopup="dialog"
+      data-count={current?.option.amount !== undefined || undefined}
       aria-describedby={tooltip.active ? tooltipId : undefined}
       aria-keyshortcuts={preview ? 'Shift+F10' : undefined}
       onPointerEnter={tooltip.onPointerEnter}
@@ -1253,29 +1632,32 @@ function RecipeInput({ input, findItem, rotation, links, onOpenIngredient }: Ing
         onOpenIngredient();
       }}>
       {content}
-    </button>}
+    </button>
     {target && <ItemTooltipPopover id={tooltipId} anchor={target.anchor} onDismiss={hideIngredientTooltip}>
       <strong>{tagLabels || text.itemRecipeAlternatives}</strong>
       <ul className="item-recipe-ingredient-tooltip-list">
-        {items.slice(0, ingredientTooltipLimit).map(id => <li key={id}>{findItem(id)?.name ?? id}</li>)}
+        {variants.slice(0, ingredientTooltipLimit).map((option, index) => <li key={index}>
+          <MinecraftItemText text={ingredientOptionName(option, findIngredientItem(option, findItem))} />
+        </li>)}
       </ul>
-      {items.length > ingredientTooltipLimit && <div>{text.itemRecipeAdditionalOptions(items.length - ingredientTooltipLimit)}</div>}
-      <IngredientNotes input={input} />
+      {variants.length > ingredientTooltipLimit && <div>{text.itemRecipeAdditionalOptions(variants.length - ingredientTooltipLimit)}</div>}
+      <IngredientNotes input={input} count={variants.length} />
     </ItemTooltipPopover>}
   </>;
 }
 
-function IngredientNotes({ input }: { input: RecipeIngredient }) {
+function IngredientNotes({ input, count }: { input: RecipeIngredient; count: number }) {
   const { text } = usePreferences();
   return <>
     {input.custom && <p>{text.itemRecipeCustomInput}</p>}
     {input.truncated && <p>{text.itemRecipeMoreExamples}</p>}
-    {!input.items.length && !input.custom && <p>{text.itemRecipeUnknownInput}</p>}
+    {!count && !input.custom && <p>{text.itemRecipeUnknownInput}</p>}
   </>;
 }
 
-function RecipeIngredientDialog({ input, item, catalog, links, onClose, children }: Pick<RecipeCatalog, 'item' | 'catalog'> & {
+function RecipeIngredientDialog({ input, options, item, catalog, links, onClose, children }: Pick<RecipeCatalog, 'item' | 'catalog'> & {
   input?: RecipeIngredient;
+  options?: MachineOptions;
   links: ItemLinkActions;
   onClose: () => void;
   children: ReactNode;
@@ -1283,60 +1665,147 @@ function RecipeIngredientDialog({ input, item, catalog, links, onClose, children
   const { text } = usePreferences();
   const headingId = useId();
   const dialog = useRef<HTMLDialogElement>(null);
-  const load = useMemo(() => (signal: AbortSignal) => {
-    const ids = new Set(input?.items);
+  const section = useRef<HTMLDivElement>(null);
+  const [requestedPage, setPage] = useState(0);
+  const alternatives = options?.alternatives;
+  const variants = useMemo(() => input ? ingredientOptions(input, alternatives) : [], [input, alternatives]);
+  const pageCount = Math.ceil(variants.length / ingredientVariantsPerPage);
+  const page = Math.max(0, Math.min(requestedPage, pageCount - 1));
+  const pageStart = page * ingredientVariantsPerPage;
+  const visibleVariants = useMemo(() => variants.slice(pageStart, pageStart + ingredientVariantsPerPage), [pageStart, variants]);
+  const load = useMemo(() => async (signal: AbortSignal) => {
+    const ids = new Set<string>();
+    addIngredientLookups(ids, visibleVariants);
     ids.delete(item.id);
-    return catalog.getItems(ids, signal);
-  }, [catalog, input, item.id]);
-  const { state, retry } = useRequest(load);
+    const items = await catalog.getItems(ids, signal);
+    const unlisted = new Set(visibleVariants.flatMap(({ id, kind }) =>
+      kind === 'item' && id !== item.id && !items.has(id) ? [id] : [],
+    ));
+    const icons = unlisted.size ? await catalog.getRecipeItemIcons?.(unlisted, signal) : undefined;
+    return { items, icons };
+  }, [catalog, item.id, visibleVariants]);
+  const { state, retry } = useRequest(load, visibleVariants.length > 0);
+  const findItem = (id: string) => id === item.id ? item : state.status === 'ready' ? state.data.items.get(id) : undefined;
+
+  function selectPage(nextPage: number) {
+    if (nextPage === page) return;
+    links.hideTooltip();
+    const activeArrow = section.current?.querySelector('.item-pagination button:focus');
+    if (activeArrow && (activeArrow.hasAttribute('data-previous') ? nextPage === 0 : nextPage === pageCount - 1)) {
+      section.current?.querySelector<HTMLInputElement>('.item-pagination input')?.focus();
+    }
+    setPage(nextPage);
+    section.current?.scrollTo(0, 0);
+  }
+
   useLayoutEffect(() => {
     const element = dialog.current;
     if (!element) return;
     element.showModal();
-    return () => element.close();
+    const arrival = animateItemArrival(element.querySelector<HTMLElement>('.item-detail'));
+    return () => {
+      arrival?.cancel();
+      element.close();
+    };
   }, []);
 
   return <dialog className="item-detail-overlay" ref={dialog} aria-labelledby={headingId}
     onCancel={event => { event.preventDefault(); event.stopPropagation(); onClose(); }}>
-    <div className="item-detail">
+    <div className="item-detail item-ingredient-detail">
       <div className="item-detail-heading">
         <h2 id={headingId}>{text.itemRecipeAlternatives}</h2>
         <button className="item-action item-detail-close" type="button" onClick={onClose} aria-label={text.close}>×</button>
       </div>
-      <div className="item-detail-section" data-section="recipes" tabIndex={0}>
+      <div className="item-detail-section" ref={section} data-section="recipes" tabIndex={0}>
         {input?.tags.map(tag => <code key={tag}>#{tag}</code>)}
         {!input && <p>{text.itemRecipeIngredientUnavailable}</p>}
-        {input && state.status === 'loading' && <p role="status">{text.itemDetailsLoading}</p>}
+        {pageCount > 1 && <div className="item-recipe-navigation">
+          <ItemPagination currentPage={page} pageCount={pageCount} onSelectPage={selectPage} onStep={offset => selectPage(page + offset)} />
+        </div>}
+        {visibleVariants.length > 0 && state.status === 'loading' && <ItemDetailsLoading />}
         {input && state.status === 'error' && <ItemRequestError retry={retry} />}
-        <ul className="item-recipe-ingredient-list">
-          {input?.items.map(id => {
-            const example = id === item.id ? item : state.status === 'ready' ? state.data.get(id) : undefined;
-            return <li key={id}>
-              <div className="item-recipe-slot"><RecipeIcon item={example} id={id} links={links} /></div>
-              <span>{example?.name ?? id}</span>
+        {!!visibleVariants.length && <ul className="item-recipe-ingredient-list" aria-busy={state.status === 'loading'}>
+          {visibleVariants.map((option, index) => {
+            const { id, kind, amount } = option;
+            const example = findIngredientItem(option, findItem);
+            const fluid = kind === 'fluid';
+            return <li key={pageStart + index} className="item-recipe-slot" data-fluid={fluid || undefined}>
+              {state.status === 'loading' ? null
+                : fluid ? <RecipeFluidIcon ingredient={option} item={example} icon={options?.fluidIcon(option)} links={links} />
+                : <RecipeIcon item={example} id={id} count={amount} links={links} showMissingTooltip
+                  icon={state.status === 'ready' ? state.data.icons?.get(id) : undefined} />}
             </li>;
           })}
-        </ul>
-        {input && <IngredientNotes input={input} />}
+        </ul>}
+        {input && <IngredientNotes input={input} count={variants.length} />}
       </div>
     </div>
     {children}
   </dialog>;
 }
 
-function RecipeIcon({ item, id, count, label, links }: {
+function RecipeFluidIcon({ ingredient, item, icon, links }: {
+  ingredient: MachineIngredient;
+  item?: CatalogItem;
+  icon?: string;
+  links: ItemLinkActions;
+}) {
+  const { text } = usePreferences();
+  const label = ingredientOptionName(ingredient, item);
+  const content = <>
+    <ItemIcon icon={icon ?? item?.icon} fluid lazy />
+    <span className="item-recipe-count" aria-hidden="true">
+      {formatFluidAmount(ingredient.amount)}
+    </span>
+  </>;
+  return item ? <ItemLink item={item} label={label} {...links}>{content}</ItemLink>
+    : <UnlistedRecipeIcon label={label} description={<>
+      <strong><MinecraftItemText text={ingredient.name ?? ingredient.id} /></strong>
+      <div>{text.itemFluid} · {formatFluidAmount(ingredient.amount)}</div>
+    </>}>{content}</UnlistedRecipeIcon>;
+}
+
+function UnlistedRecipeIcon({ label, description, children }: { label: string; description: ReactNode; children: ReactNode }) {
+  const tooltipId = useId();
+  const [target, setTarget] = useState<TooltipTarget>();
+  const hideTooltip = useCallback((anchor?: HTMLElement) => {
+    setTarget(current => !anchor || current?.anchor === anchor ? undefined : current);
+  }, []);
+  const tooltip = useTooltipTrigger<HTMLButtonElement>(target, setTarget, hideTooltip);
+  return <>
+    <button className="item-slot-button" type="button" aria-label={plainMinecraftText(label)}
+      aria-describedby={tooltip.active ? tooltipId : undefined}
+      onPointerEnter={tooltip.onPointerEnter} onPointerLeave={tooltip.onPointerLeave} onPointerDown={tooltip.onPointerDown}
+      onFocus={tooltip.onFocus} onBlur={tooltip.onBlur} onClick={event => { tooltip.previewTouch(event); }}
+      onKeyDown={event => { if (event.key === 'Escape' && tooltip.active) { event.preventDefault(); hideTooltip(); } }}>
+      {children}
+    </button>
+    {target && <ItemTooltipPopover id={tooltipId} anchor={target.anchor} onDismiss={hideTooltip}>
+      {description}
+    </ItemTooltipPopover>}
+  </>;
+}
+
+function RecipeIcon({ item, id, count, label, links, icon, showMissingTooltip }: {
   item?: CatalogItem;
   id: string;
   count?: number;
   label?: string;
   links: ItemLinkActions;
+  icon?: string;
+  showMissingTooltip?: boolean;
 }) {
   const name = item?.name ?? id;
   const accessibleName = label ?? (count ? `${count} × ${name}` : name);
   const content = <>
-    <ItemIcon icon={item?.icon} bar={item?.bar} lazy />
+    <ItemIcon icon={item?.icon ?? icon} bar={item?.bar} lazy />
     {count !== undefined && <span className="item-recipe-count" aria-hidden="true">{count}</span>}
   </>;
-  return item ? <ItemLink item={item} label={accessibleName} {...links}>{content}</ItemLink>
-    : <span className="item-recipe-missing" role="img" aria-label={accessibleName} title={accessibleName}>{content}</span>;
+  if (item) return <ItemLink item={item} label={accessibleName} {...links}>{content}</ItemLink>;
+  if (showMissingTooltip) {
+    return <UnlistedRecipeIcon label={accessibleName} description={<strong><MinecraftItemText text={accessibleName} /></strong>}>
+      {content}
+    </UnlistedRecipeIcon>;
+  }
+  return <span className="item-recipe-missing" role="img" aria-label={accessibleName} title={accessibleName}>{content}</span>;
 }

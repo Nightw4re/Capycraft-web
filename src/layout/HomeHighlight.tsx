@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
 import { usePreferences } from '../PreferencesProvider';
+import { useSceneContentReady } from '../scene/SceneEntrance';
 import { homeHighlightFacts } from './homeHighlightFacts';
+import { PlayIcon } from './PlayIcon';
 import './home-highlight.css';
 
 const reducedMotionQuery = '(prefers-reduced-motion: reduce)';
-const rotationDelay = 20_000;
 
 type FactPosition = {
   current: number;
@@ -19,9 +20,9 @@ function advanceFact({ current }: FactPosition, step: FactPosition['step']): Fac
 
 export function HomeHighlight() {
   const { language, text } = usePreferences();
+  const sceneContentReady = useSceneContentReady();
   const [position, setPosition] = useState<FactPosition>({ current: 0, previous: -1, step: 1 });
   const [rotationEnabled, setRotationEnabled] = useState(() => !window.matchMedia(reducedMotionQuery).matches);
-  const [hovered, setHovered] = useState(false);
   const rotationLabel = rotationEnabled ? text.homeHighlightPause : text.homeHighlightPlay;
 
   useEffect(() => {
@@ -32,14 +33,6 @@ export function HomeHighlight() {
     motion.addEventListener('change', respectReducedMotion);
     return () => motion.removeEventListener('change', respectReducedMotion);
   }, []);
-
-  useEffect(() => {
-    if (!rotationEnabled || hovered) return;
-    const timer = window.setInterval(() => {
-      setPosition(current => advanceFact(current, 1));
-    }, rotationDelay);
-    return () => window.clearInterval(timer);
-  }, [hovered, rotationEnabled]);
 
   function moveFact(step: FactPosition['step']) {
     setRotationEnabled(false);
@@ -58,12 +51,6 @@ export function HomeHighlight() {
       data-direction={position.step === 1 ? 'next' : 'previous'}
       onFocus={event => {
         if (event.target.matches(':focus-visible')) setRotationEnabled(false);
-      }}
-      onPointerEnter={event => {
-        if (event.pointerType === 'mouse') setHovered(true);
-      }}
-      onPointerLeave={event => {
-        if (event.pointerType === 'mouse') setHovered(false);
       }}
     >
       <div className="home-highlight-art" aria-hidden="true">
@@ -95,10 +82,16 @@ export function HomeHighlight() {
             </svg>
           </button>
           <button className="home-highlight-rotation" type="button" aria-label={rotationLabel} title={rotationLabel}
+            data-rotating={rotationEnabled && sceneContentReady}
             onClick={() => setRotationEnabled(enabled => !enabled)}>
-            <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-              <path d={rotationEnabled ? 'M5 4h3v12H5zM12 4h3v12h-3z' : 'M6 3l10 7-10 7z'} />
+            <svg className="home-highlight-progress" viewBox="0 0 44 44" aria-hidden="true">
+              <path className="home-highlight-progress-track" d="M22 4H40V40H4V4Z" />
+              <path key={position.current} className="home-highlight-progress-fill" d="M22 4H40V40H4V4Z" pathLength="100"
+                onAnimationEnd={() => setPosition(current => advanceFact(current, 1))} />
             </svg>
+            {rotationEnabled ? <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path d="M5 4h3v12H5zM12 4h3v12h-3z" />
+            </svg> : <PlayIcon />}
           </button>
         </div>
       </div>

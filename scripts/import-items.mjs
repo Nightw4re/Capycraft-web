@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url';
 import sharp from 'sharp';
 import yauzl from 'yauzl';
 import layout from '../src/items/catalogLayout.json' with { type: 'json' };
-import { lookupSlot, readItemBar, searchText } from '../src/items/catalogIndex.mjs';
+import { lookupSlot, readItemBar, readTooltipAlternatives, searchText } from '../src/items/catalogIndex.mjs';
 import { defaultAlias } from '../src/minecraftServers.mjs';
 import { catalogDatabasePath, catalogStorage, createCatalogDatabase, hasCatalogDatabase } from '../server/catalogAssets.mts';
 import { instanceDirectory, itemCatalogDirectory, loadInstances } from '../server/instances.mts';
@@ -18,15 +18,24 @@ import { recipeUsesDatabasePath, writeStoredRecipeUses } from '../server/recipeU
 
 const root = join(import.meta.dirname, '..');
 const itemId = /^[a-z0-9_.-]+:[a-z0-9_./-]+$/;
-const previewPath = /^previews\/[a-f0-9]{64}\.(?:png|webp)$/;
+const previewPath = /^(?:previews|animations)\/[a-f0-9]{64}\.(?:png|webp)$/;
 const revisionId = /^[a-f0-9]{64}$/;
 const pngSignature = Buffer.from('89504e470d0a1a0a', 'hex');
 const atlasRows = layout.pageSize / layout.atlasColumns;
 const webpOptions = { lossless: true, effort: 4 };
 const folders = ['icons', 'details', 'atlases', 'pages', 'lookup', 'search', 'payloads'];
 const manifestName = 'catalog.json';
-const recipeDataVersion = 4;
+const recipeItemPreviewPath = 'catalog-data/recipe-item-previews.json';
+const maxRecipeItemPreviewBytes = 16 * 1024 * 1024;
+const recipeDataVersion = 7;
+const previewDataVersion = 2;
+const searchDataVersion = 1;
 const fluidRecipePath = /^catalog-data\/machine-recipes\/fluids\/([a-z0-9_.-]+)\/([a-z0-9_./-]+)\.json$/;
+const catalogDocumentPath = /^catalog-data\/(?:tooltips|stacks|recipes|recipe-tags|machine-recipes\/(?:items|fluids|groups))\/.+\.json$/;
+const bundleRoot = 'catalog-data/bundles/v1/';
+const bundlePath = /^catalog-data\/bundles\/v1\/(?:index\/)?\d+\.json$/;
+const fluidTextureFolder = 'catalog-data/machine-recipes/textures';
+const fluidTexturePath = /^catalog-data\/machine-recipes\/textures\/[a-f0-9]{64}\.(?:png|webp)$/;
 
 function digest(data) {
   return createHash('sha256').update(data).digest('hex');
@@ -58,15 +67,16 @@ function catalogOrder(items, language) {
 
 async function writeCatalog(store, items, atlases, metadata, publishedFiles) {
   const order = { cs: catalogOrder(items, 'cs'), en: catalogOrder(items, 'en') };
+  const records = items.map(({ searchTooltip, searchTags, ...item }) => item);
   const pages = { cs: [], en: [] };
   for (const language of Object.keys(pages)) {
     for (let first = 0; first < items.length; first += layout.pageSize) {
-      const page = order[language].slice(first, first + layout.pageSize).map(index => items[index]);
+      const page = order[language].slice(first, first + layout.pageSize).map(index => records[index]);
       pages[language].push(await writeJson(store, 'pages', page, publishedFiles.pages));
     }
   }
   const buckets = Array.from({ length: 256 }, () => []);
-  for (const item of items) buckets[lookupSlot(item.id)].push(item);
+  for (const item of records) buckets[lookupSlot(item.id)].push(item);
   const lookup = [];
   for (const bucket of buckets) lookup.push(bucket.length ? await writeJson(store, 'lookup', bucket, publishedFiles.lookup) : null);
 
@@ -173,19 +183,19 @@ async function readArchive(path, store, publish, pace, report, useAtlases, index
   const zipStarted = performance.now();
   const zip = await yauzl.openPromise(path, { autoClose: false, strictFileNames: true });
   const entries = new Map();
-  const fluidRecipePaths = [];
+  const fluidRecipePaths = new Set();
   const recipeUses = createRecipeUsesIndex();
   const archiveStats = { entries: zip.entryCount, zipReadMs: 0, dataReads: 0, dataBytes: 0, imageReads: 0, imageBytes: 0 };
 
   try {
     for await (const entry of zip.eachEntry()) {
       const name = entry.fileName;
-      const fluid = fluidRecipePath.exec(name);
-      if (name !== 'format.txt' && name !== 'catalog.json' && !previewPath.test(name)
-        && !fluid && !/^catalog-data\/(?:tooltips|stacks|recipes|machine-recipes\/(?:items|groups))\/.+\.json$/.test(name)) continue;
+      if (name !== 'format.txt' && name !== 'catalog.json' && name !== recipeItemPreviewPath
+        && !previewPath.test(name) && !fluidTexturePath.test(name)
+        && !catalogDocumentPath.test(name) && !bundlePath.test(name)) continue;
       if (entries.has(name)) throw new Error(`Duplicate export entry: ${name}`);
       entries.set(name, entry);
-      if (fluid) fluidRecipePaths.push(fluid.slice(1));
+      if (fluidRecipePath.test(name)) fluidRecipePaths.add(name);
     }
     archiveStats.zipReadMs = performance.now() - zipStarted;
 
@@ -216,12 +226,41 @@ async function readArchive(path, store, publish, pace, report, useAtlases, index
     const written = new Set();
     const animatedIcons = new Set();
     const writtenPayloads = new Set();
-    async function importIcon(key) {
+    const tooltipShortcuts = new Map();
+    const bundledDocuments = new Map();
+    const bundleBytes = new Map();
+    for (const [name, entry] of entries) {
+      if (!name.startsWith(`${bundleRoot}index/`)) continue;
+      const index = JSON.parse((await read(entry)).toString('utf8'));
+      for (const [logicalPath, range] of Object.entries(index)) {
+        if (!catalogDocumentPath.test(logicalPath) || entries.has(logicalPath)) continue;
+        const [bundle, offset, length] = Array.isArray(range) ? range : [];
+        const bundleEntry = entries.get(`${bundleRoot}${bundle}.json`);
+        if (bundledDocuments.has(logicalPath) || !Number.isSafeInteger(bundle) || bundle < 0 || !bundleEntry
+          || !Number.isSafeInteger(offset) || offset < 1 || !Number.isSafeInteger(length) || length < 1
+          || length > bundleEntry.uncompressedSize - offset) {
+          throw new Error(`Invalid catalog bundle reference for ${logicalPath}`);
+        }
+        bundledDocuments.set(logicalPath, { bundleEntry, offset, length });
+        if (fluidRecipePath.test(logicalPath)) fluidRecipePaths.add(logicalPath);
+      }
+    }
+
+    async function readDocument(path) {
+      const entry = entries.get(path);
+      if (entry) return read(entry);
+      const range = bundledDocuments.get(path);
+      if (!range) return undefined;
+      const { bundleEntry, offset, length } = range;
+      if (!bundleBytes.has(bundleEntry)) bundleBytes.set(bundleEntry, await read(bundleEntry));
+      return bundleBytes.get(bundleEntry).subarray(offset, offset + length);
+    }
+    async function importIcon(key, folder = 'previews') {
       if (typeof key !== 'string') return undefined;
-      if (imported.has(key)) return imported.get(key);
-      const path = `previews/${key}`;
-      const entry = entries.get(`${path}.webp`) ?? entries.get(`${path}.png`);
+      const animated = folder === 'previews' ? entries.get(`animations/${key}.webp`) ?? entries.get(`animations/${key}.png`) : undefined;
+      const entry = animated ?? entries.get(`${folder}/${key}.webp`) ?? entries.get(`${folder}/${key}.png`);
       if (!entry) return undefined;
+      if (imported.has(entry.fileName)) return imported.get(entry.fileName);
 
       const image = await read(entry, true);
       const webp = entry.fileName.endsWith('.webp');
@@ -243,26 +282,61 @@ async function readArchive(path, store, publish, pace, report, useAtlases, index
         await store.write('icons', filename, image);
         written.add(filename);
       }
-      imported.set(key, filename);
+      imported.set(entry.fileName, filename);
       return filename;
     }
 
     async function readPayload(group, filename, valid, versions = [1]) {
-      const entry = entries.get(`catalog-data/${group}/${filename}.json`);
-      if (!entry) return undefined;
-      const bytes = await read(entry);
+      const bytes = await readDocument(`catalog-data/${group}/${filename}.json`);
+      if (!bytes) return undefined;
       const payload = JSON.parse(bytes.toString('utf8'));
       if (!versions.includes(payload?.version) || !valid(payload)) return undefined;
       return { bytes, payload };
     }
 
     const machineGroups = new Map();
+    const fluidIcons = new Map();
+    async function addFluidIcons(recipe) {
+      const slots = recipe?.layout?.slots;
+      if (!Array.isArray(slots)) return recipe;
+      const decorated = [];
+      let changed = false;
+      for (const slot of slots) {
+        if (!Array.isArray(slot?.alternatives)
+          || !slot.alternatives.some(value => value?.kind === 'fluid' && typeof value.texture === 'string')) {
+          decorated.push(slot);
+          continue;
+        }
+        const alternatives = [];
+        let updated = false;
+        for (const value of slot.alternatives) {
+          if (value?.kind === 'fluid' && typeof value.texture === 'string') {
+            if (!fluidIcons.has(value.texture)) fluidIcons.set(value.texture, await importIcon(value.texture, fluidTextureFolder));
+            const icon = fluidIcons.get(value.texture);
+            if (icon) {
+              alternatives.push({ ...value, icon });
+              updated = true;
+              continue;
+            }
+          }
+          alternatives.push(value);
+        }
+        decorated.push(updated ? { ...slot, alternatives } : slot);
+        changed ||= updated;
+      }
+      return changed ? { ...recipe, layout: { ...recipe.layout, slots: decorated } } : recipe;
+    }
     async function readMachineRecipes(kind, path, id) {
       const idField = kind === 'fluids' ? 'fluidId' : 'itemId';
       const data = await readPayload(`machine-recipes/${kind}`, path, payload => payload[idField] === id, [1, 2]);
       if (!data) return undefined;
       const { groups, ...payload } = data.payload;
-      if (payload.version === 1) return Array.isArray(payload.recipes) ? payload : undefined;
+      if (payload.version === 1) {
+        if (!Array.isArray(payload.recipes)) return undefined;
+        const recipes = [];
+        for (const recipe of payload.recipes) recipes.push(await addFluidIcons(recipe));
+        return { ...payload, recipes };
+      }
       if (!groups || typeof groups !== 'object' || Array.isArray(groups)) return undefined;
 
       const recipes = [];
@@ -284,7 +358,7 @@ async function readArchive(path, store, publish, pace, report, useAtlases, index
             const alternatives = variant.slots?.[index];
             return Array.isArray(alternatives) ? { ...slot, alternatives } : slot;
           });
-          recipes.push({ ...template, id: variant.id, layout: { ...template.layout, slots } });
+          recipes.push(await addFluidIcons({ ...template, id: variant.id, layout: { ...template.layout, slots } }));
         }
       }
       return recipes.length ? { ...payload, version: 1, recipes } : undefined;
@@ -304,23 +378,85 @@ async function readArchive(path, store, publish, pace, report, useAtlases, index
       return data && writePayload(data.bytes);
     }
 
-    async function importRecipes(id, path) {
-      const forItem = data => data.itemId === id && Array.isArray(data.recipes);
-      const world = await readPayload('recipes', path, forItem);
-      const machine = await readMachineRecipes('items', path, id);
-      if (world) addRecipeUses(recipeUses, world.payload.recipes);
-      if (machine) {
-        const feed = world?.payload ?? { version: 1, itemId: id, recipes: [] };
-        return writePayload(Buffer.from(JSON.stringify({ ...feed, machineRecipes: machine })));
+    const recipeTags = new Map();
+    async function readRecipeTag(tag) {
+      if (!recipeTags.has(tag)) {
+        const data = await readPayload('recipe-tags', tag.replace(':', '/'), value => value.id === tag && Array.isArray(value.items));
+        recipeTags.set(tag, data?.payload.items);
       }
-      return world && writePayload(world.bytes);
+      return recipeTags.get(tag);
     }
 
-    async function importStackData(path, variant = '') {
+    const tagPaths = new Set([...entries.keys(), ...bundledDocuments.keys()].filter(path => path.startsWith('catalog-data/recipe-tags/')));
+    const tagsByItem = new Map();
+    for (const path of tagPaths) {
+      const tag = path.slice('catalog-data/recipe-tags/'.length, -'.json'.length).replace('/', ':');
+      if (!itemId.test(tag)) continue;
+      const searchTag = searchText(tag);
+      for (const item of (await readRecipeTag(tag)) ?? []) {
+        if (!tagsByItem.has(item)) tagsByItem.set(item, []);
+        tagsByItem.get(item).push(searchTag);
+      }
+    }
+
+    async function expandRecipe(recipe) {
+      if (!Array.isArray(recipe?.inputs)) return recipe;
+      const inputs = [];
+      for (const input of recipe.inputs) {
+        if (!input || (!Array.isArray(input.tags) && !Array.isArray(input.items))) {
+          inputs.push(input);
+          continue;
+        }
+        const examples = Array.isArray(input.exampleItems) ? input.exampleItems : undefined;
+        const explicit = Array.isArray(input.items) ? input.items : [];
+        const items = new Set([...(examples ?? []), ...explicit]);
+        let examplesTruncated = input.examplesTruncated === true;
+        for (const tag of Array.isArray(input.tags) ? input.tags : []) {
+          const members = typeof tag === 'string' && itemId.test(tag) ? await readRecipeTag(tag) : undefined;
+          if (!members && !examples) examplesTruncated = true;
+          for (const item of members ?? []) items.add(item);
+        }
+        inputs.push({ ...input, exampleItems: [...items], examplesTruncated });
+      }
+      return { ...recipe, inputs };
+    }
+
+    async function importRecipes(id, path) {
+      const forItem = data => data.itemId === id && Array.isArray(data.recipes);
+      const world = await readPayload('recipes', path, forItem, [1, 2]);
+      const machine = await readMachineRecipes('items', path, id);
+      const feed = world?.payload ?? { version: 1, itemId: id, recipes: [] };
+      if (feed.version === 2) {
+        const recipes = [];
+        for (const recipe of feed.recipes) recipes.push(await expandRecipe(recipe));
+        feed.recipes = recipes;
+      }
+      if (world) addRecipeUses(recipeUses, feed.recipes);
+      if (machine) {
+        return writePayload(Buffer.from(JSON.stringify({ ...feed, machineRecipes: machine })));
+      }
+      return world && writePayload(feed.version === 2 ? Buffer.from(JSON.stringify(feed)) : world.bytes);
+    }
+
+    async function importStackData(path, variant = '', search = undefined) {
       const filename = `${path}@${variant.replaceAll(':', '%3A').replaceAll('/', '%2F')}`;
-      const tooltip = await importPayload('tooltips', filename, data => Array.isArray(data.lines));
+      const tooltipExport = await readPayload('tooltips', filename, data => Array.isArray(data.lines));
+      const tooltip = tooltipExport && await writePayload(tooltipExport.bytes);
+      const alternatives = readTooltipAlternatives(tooltipExport?.payload);
+      for (const { id, label } of alternatives) {
+        if (!tooltipShortcuts.has(id)) tooltipShortcuts.set(id, { id, label });
+      }
+      if (tooltipExport && search) {
+        const lines = tooltipExport.payload.lines.filter(Array.isArray).map(line => line.map(span =>
+          typeof span?.text === 'string' ? span.text : '').join(''));
+        const normalized = searchText(lines.join('\n'));
+        if (normalized.trim()) search.searchTooltip = normalized;
+      }
       const stack = await importPayload('stacks', filename, data => Number.isInteger(data.count) && 'nbt' in data && 'components' in data);
-      return tooltip || stack ? { tooltip, stack } : undefined;
+      return {
+        payloads: tooltip || stack ? { tooltip, stack } : undefined,
+        tooltipShortcutIds: alternatives.length ? alternatives.map(({ id }) => id) : undefined,
+      };
     }
 
     const seen = new Set();
@@ -331,11 +467,33 @@ async function readArchive(path, store, publish, pace, report, useAtlases, index
       seen.add(row.id);
       row.name = typeof row.name === 'string' && row.name.trim() ? row.name : row.id;
     }
+    const recipePreviewEntry = entries.get(recipeItemPreviewPath);
+    let recipeItemIcons;
+    if (recipePreviewEntry) {
+      if (recipePreviewEntry.uncompressedSize > maxRecipeItemPreviewBytes) {
+        throw new Error('Recipe item preview index is too large.');
+      }
+      const keys = JSON.parse((await read(recipePreviewEntry)).toString('utf8'));
+      if (!keys || typeof keys !== 'object' || Array.isArray(keys)) throw new Error('Invalid recipe item preview index.');
+      const icons = Object.create(null);
+      for (const [id, key] of Object.entries(keys)) {
+        if (seen.has(id) || !itemId.test(id) || typeof key !== 'string' || !revisionId.test(key)) continue;
+        const icon = await importIcon(key);
+        if (icon) icons[id] = icon;
+      }
+      if (Object.keys(icons).length) recipeItemIcons = await writeJson(store, 'payloads', icons);
+    }
     const fluids = new Map();
-    for (const [namespace, resource] of fluidRecipePaths) {
+    for (const path of fluidRecipePaths) {
+      const [, namespace, resource] = fluidRecipePath.exec(path);
       const fluidId = `${namespace}:${resource}`;
       const machine = await readMachineRecipes('fluids', `${namespace}/${resource}`, fluidId);
       if (!machine?.recipes.length) continue;
+      const outputs = machine.recipes.flatMap(recipe => {
+        const slots = recipe?.layout?.slots;
+        return Array.isArray(slots) ? slots.filter(slot => slot?.role === 'output' && Array.isArray(slot.alternatives))
+          .flatMap(slot => slot.alternatives).filter(value => value?.kind === 'fluid' && value.id === fluidId) : [];
+      });
       let id = fluidId;
       if (seen.has(id)) {
         let prefix = '/fluids/';
@@ -347,7 +505,7 @@ async function readArchive(path, store, publish, pace, report, useAtlases, index
         ? machine.name.trim()
         : resource.replace(/[_.\/-]+/g, ' ').replace(/\b[a-z]/g, letter => letter.toUpperCase()).trim() || fluidId;
       fluids.set(id, machine);
-      rows.push({ id, name, previewKey: machine.previewKey });
+      rows.push({ id, name, previewKey: machine.previewKey, fluidIcon: outputs.find(output => output.icon)?.icon });
     }
     await report.setPhase('processing', { loaded: 0, expected: rows.length });
     const items = [];
@@ -360,13 +518,14 @@ async function readArchive(path, store, publish, pace, report, useAtlases, index
       if (atlas) atlases.push(atlas);
     };
     let checkpoint = { count: 0, at: Date.now() };
-    if (publish) await publish(items, atlases, rows.length);
+    if (publish) await publish(items, atlases, rows.length, [], recipeItemIcons);
     for (const position of catalogOrder(rows, 'cs')) {
       const row = rows[position];
       const itemPath = row.id.replace(':', '/');
       const fluid = fluids.get(row.id);
-      const icon = await importIcon(row.previewKey);
-      const payloads = fluid ? undefined : await importStackData(itemPath);
+      const icon = await importIcon(row.previewKey) ?? (fluid ? row.fluidIcon : undefined);
+      const search = { searchTags: tagsByItem.get(row.id) };
+      const { payloads, tooltipShortcutIds } = fluid ? {} : await importStackData(itemPath, '', search);
       const recipeFeed = fluid
         ? await writePayload(Buffer.from(JSON.stringify({ version: 1, fluidId: fluid.fluidId, recipes: [], machineRecipes: fluid })))
         : await importRecipes(row.id, itemPath);
@@ -378,7 +537,7 @@ async function readArchive(path, store, publish, pace, report, useAtlases, index
           ? variant.options.map(option => option?.label).filter(label => typeof label === 'string' && label.trim())
           : [];
         const icon = await importIcon(variant.previewKey);
-        const payloads = await importStackData(itemPath, variant.id);
+        const { payloads } = await importStackData(itemPath, variant.id);
         if (!icon && !payloads) continue;
         variantIds.add(variant.id);
         variants.push({ id: variant.id, name: labels.join(' / ') || variant.id, icon, payloads, bar: readItemBar(variant.bar) });
@@ -388,7 +547,9 @@ async function readArchive(path, store, publish, pace, report, useAtlases, index
       if (variants.length || payloads || recipeFeed) {
         detail = await writeJson(store, 'details', { version: layout.detailVersion, id: row.id, variants, payloads, recipeFeed });
       }
-      items.push({ id: row.id, name: row.name, icon, detail, bar: readItemBar(row.bar), fluidId: fluid?.fluidId });
+      items.push({
+        id: row.id, name: row.name, icon, detail, bar: readItemBar(row.bar), fluidId: fluid?.fluidId, tooltipShortcutIds, ...search,
+      });
       if (items.length % layout.pageSize === 0) {
         if (useAtlases) await appendAtlas(layout.pageSize);
         else await pace();
@@ -397,7 +558,7 @@ async function readArchive(path, store, publish, pace, report, useAtlases, index
       const sinceCheckpoint = Date.now() - checkpoint.at;
       if (publish && (items.length === 1 || (items.length - checkpoint.count >= 500 && sinceCheckpoint >= 5000)
         || sinceCheckpoint >= 30000)) {
-        await publish(items, atlases, rows.length);
+        await publish(items, atlases, rows.length, [...tooltipShortcuts.values()], recipeItemIcons);
         checkpoint = { count: items.length, at: Date.now() };
       }
     }
@@ -406,7 +567,8 @@ async function readArchive(path, store, publish, pace, report, useAtlases, index
     if (useAtlases && remaining) await appendAtlas(remaining);
     if (indexedRecipeUses) await writeStoredRecipeUses(store, recipeUses);
     else await store.write('search', recipeUsesIndexFile, JSON.stringify(recipeUses));
-    return { items, atlases, images: written.size, atlasMs, archiveStats };
+    return { items, atlases, tooltipShortcuts: [...tooltipShortcuts.values()], recipeItemIcons,
+      images: written.size, atlasMs, archiveStats };
   } finally {
     zip.close();
   }
@@ -519,9 +681,9 @@ async function importRevision(output, archive, sourceHash, active, revision, rep
   const storage = useSqlite ? catalogStorage : undefined;
   try {
     store = useSqlite ? await createCatalogDatabase(staging, progressive) : await createFileStore(staging);
-    const publish = progressive ? async (items, atlases, expected) => {
+    const publish = progressive ? async (items, atlases, expected, tooltipShortcuts, recipeItemIcons) => {
       const manifest = await writeCatalog(store, items, [...atlases], {
-        sourceHash, revision, storage, state: 'importing', expected,
+        sourceHash, revision, storage, state: 'importing', expected, tooltipShortcuts, recipeItemIcons,
       }, publishedFiles);
       store.checkpoint?.();
       await replaceCatalogJson(output, manifestName, manifest);
@@ -531,13 +693,14 @@ async function importRevision(output, archive, sourceHash, active, revision, rep
     await report.setPhase('publishing');
     if (await hashArchive(archive) !== sourceHash) throw new Error('The WebCraft archive changed during import. Run the import again.');
     const current = await writeCatalog(store, result.items, result.atlases, {
-      sourceHash, revision, previousRevision, legacyBackup, recipeDataVersion, storage,
-      state: 'ready', expected: result.items.length,
+      sourceHash, revision, previousRevision, legacyBackup, recipeDataVersion, previewDataVersion, searchDataVersion, storage,
+      state: 'ready', expected: result.items.length, tooltipShortcuts: result.tooltipShortcuts, recipeItemIcons: result.recipeItemIcons,
     }, publishedFiles);
     store.finish?.();
     const metrics = { ...result.archiveStats, ...store.stats?.(), durationMs: Math.round(performance.now() - started) };
     store.close?.();
     store = undefined;
+    current.publishedAt = Date.now();
     const json = JSON.stringify(current);
     await writeFile(join(staging, manifestName), json);
     await writeFile(join(staging, 'import-metrics.json'), JSON.stringify(metrics));
@@ -585,8 +748,9 @@ async function importArchive(output, source, skipCurrent, useSqlite) {
   const sourceHash = await hashArchive(source);
   const active = await activeManifest(output);
   const storage = useSqlite ? catalogStorage : undefined;
-  if (skipCurrent && active?.version === layout.version && active.recipeDataVersion === recipeDataVersion && active.storage === storage
-    && active.state === 'ready' && active.sourceHash === sourceHash
+  if (skipCurrent && active?.version === layout.version && active.recipeDataVersion === recipeDataVersion
+    && active.previewDataVersion === previewDataVersion && active.searchDataVersion === searchDataVersion && active.storage === storage
+    && active.state === 'ready' && active.sourceHash === sourceHash && Array.isArray(active.tooltipShortcuts)
     && revisionId.test(active.revision) && (!useSqlite || hasCatalogDatabase(join(output, 'revisions', active.revision)))) {
     await cleanPreviousImports(output, active);
     await publishImportStatus(output, active.revision, 'succeeded');
@@ -665,7 +829,9 @@ export async function benchmarkCatalogImport(archive, store, useAtlases) {
     setPhase() {}, setLoaded() {},
   }, useAtlases);
   const indexedAt = performance.now();
-  const manifest = await writeCatalog(store, result.items, result.atlases, {}, {
+  const manifest = await writeCatalog(store, result.items, result.atlases, {
+    tooltipShortcuts: result.tooltipShortcuts, recipeItemIcons: result.recipeItemIcons,
+  }, {
     pages: new Set(), lookup: new Set(), search: new Set(),
   });
   return {

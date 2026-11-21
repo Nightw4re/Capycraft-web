@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Server offline | Capycraft</title>
+  <link rel="icon" type="image/png" href="data:image/png;base64,__FAVICON__">
+  <style>
+    * { box-sizing: border-box; }
+
+    body {
+      display: grid;
+      min-height: 100vh;
+      min-height: 100svh;
+      margin: 0;
+      padding: 1rem;
+      place-items: center;
+      background: linear-gradient(rgb(18 19 49 / 24%), rgb(18 19 49 / 44%)),
+        #121331 url('data:image/webp;base64,__BACKDROP__') center / cover no-repeat;
+      color: #f5f1ff;
+      font: 1rem/1.5 system-ui, sans-serif;
+    }
+
+    main {
+      display: grid;
+      grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+      align-items: center;
+      gap: clamp(0.75rem, 3vw, 1.75rem);
+      width: min(100%, 36rem);
+      padding: clamp(0.875rem, 4vw, 2rem);
+      border: 1px solid #627554;
+      background: #1d2032;
+      box-shadow: 0 0.5rem 1.5rem rgb(12 9 23 / 45%);
+    }
+
+    .capybara {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    h1 { margin: 0; font-size: clamp(1.25rem, 4.5vw, 2rem); line-height: 1.2; }
+    p { margin: 0.5rem 0 1rem; color: #ded9ea; }
+
+    button {
+      min-height: 2.75rem;
+      padding: 0.5rem 1.25rem;
+      border: 1px solid #9ece87;
+      border-radius: 0;
+      background: #263a2b;
+      color: #f5f1ff;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    button:hover { background: #344f3a; }
+    button:focus-visible { outline: 2px solid #f5f1ff; outline-offset: 3px; }
+  </style>
+</head>
+<body>
+  <main>
+    <img class="capybara" src="data:image/webp;base64,__CAPYBARA__" width="1312" height="1199" alt="">
+    <div>
+      <h1>Server offline</h1>
+      <p>Capycraft is temporarily unavailable.</p>
+      <button type="button">Try again</button>
+    </div>
+  </main>
+  <script>
+    document.querySelector('button').addEventListener('click', () => window.location.reload());
+  </script>
+</body>
+</html>

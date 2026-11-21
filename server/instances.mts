@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync, type Dirent } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { catalogSubdirectory, defaultAlias, defaultTabs, isServerAlias, type ServerPage } from '../src/minecraftServers.mjs';
 
-type Exposure = 'public' | 'internal';
+export type Exposure = 'public' | 'internal';
 
 export type Instance = {
   alias: string;
@@ -14,6 +14,8 @@ export type Instance = {
     tokenEnv?: string;
     info: Exposure;
     status: Exposure;
+    directoryTransport: 'http' | 'websocket';
+    onlinePlayersTransport?: 'http' | 'websocket';
     playerHistory: boolean;
   };
 };
@@ -95,8 +97,16 @@ function parseInstance(folder: string, value: unknown, directory: string): Insta
     throw new Error('Feed exposure must be public or internal.');
   }
   const playerHistory = 'playerHistory' in value ? value.playerHistory : false;
-  if (typeof playerHistory !== 'boolean' || (!tokenEnv && (info === 'internal' || status === 'internal' || playerHistory))) {
+  const onlinePlayersTransport = 'onlinePlayersTransport' in value ? value.onlinePlayersTransport : undefined;
+  if (onlinePlayersTransport !== undefined && onlinePlayersTransport !== 'http' && onlinePlayersTransport !== 'websocket') {
+    throw new Error('onlinePlayersTransport must be http or websocket.');
+  }
+  if (typeof playerHistory !== 'boolean' || (!tokenEnv && (info === 'internal' || status === 'internal' || playerHistory || onlinePlayersTransport))) {
     throw new Error('Internal feeds require tokenEnv.');
+  }
+  const directoryTransport = 'directoryTransport' in value ? value.directoryTransport : 'http';
+  if (directoryTransport !== 'http' && directoryTransport !== 'websocket') {
+    throw new Error('directoryTransport must be http or websocket.');
   }
   const tabs = 'tabs' in value ? value.tabs : defaultTabs;
   if (!Array.isArray(tabs) || !tabs.every(tab => tab === 'items' || tab === 'players') || new Set(tabs).size !== tabs.length) {
@@ -104,7 +114,7 @@ function parseInstance(folder: string, value: unknown, directory: string): Insta
   }
   return {
     alias, tabs, inbox: join(directory, 'imports'), catalog: join(directory, 'catalog'),
-    webcraft: { origin: url.origin, tokenEnv, info, status, playerHistory },
+    webcraft: { origin: url.origin, tokenEnv, info, status, directoryTransport, onlinePlayersTransport, playerHistory },
   };
 }
 

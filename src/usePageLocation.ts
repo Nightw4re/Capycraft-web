@@ -1,28 +1,29 @@
 import { useEffect, useEffectEvent, useState, type RefObject } from 'react';
 import { flushSync } from 'react-dom';
-import { canonicalHash, routeFromHash, type Page } from './navigation';
+import { pageUrl, routeFromUrl, type Page } from './navigation';
 import { animatePageArrival, animatePageDeparture } from './scene/pageMotion';
 
 const pageOrder: readonly Page[] = ['home', 'items', 'players', 'notFound'];
 
-function readLocationHash() {
-  const next = canonicalHash(window.location.hash);
-  if (next !== window.location.hash) window.history.replaceState(window.history.state, '', next);
-  return next;
+function readLocationUrl() {
+  const location = window.location;
+  const url = pageUrl(location);
+  if (location.hash.startsWith('#/')) window.history.replaceState(window.history.state, '', url);
+  return url;
 }
 
-export function usePageHash(panelsRef: RefObject<HTMLDivElement | null>, isKnownServer: (alias: string) => boolean) {
-  const [hash, setHash] = useState(() => canonicalHash(window.location.hash));
-  const getCurrentPage = useEffectEvent(() => routeFromHash(hash, isKnownServer).page);
-  const getPage = useEffectEvent((value: string) => routeFromHash(value, isKnownServer).page);
+export function usePageLocation(panelsRef: RefObject<HTMLDivElement | null>, isKnownServer: (alias: string) => boolean) {
+  const [url, setUrl] = useState(() => pageUrl(window.location));
+  const getCurrentPage = useEffectEvent(() => routeFromUrl(url, isKnownServer).page);
+  const getPage = useEffectEvent((value: string) => routeFromUrl(value, isKnownServer).page);
 
   useEffect(() => {
     const motion = window.matchMedia('(prefers-reduced-motion: no-preference)');
     let departure: Animation | undefined;
     let arrival: Animation | undefined;
 
-    function updateHash() {
-      const next = readLocationHash();
+    function updateLocation() {
+      const next = readLocationUrl();
       const currentPage = getCurrentPage();
       const nextPage = getPage(next);
       const panels = panelsRef.current;
@@ -31,7 +32,7 @@ export function usePageHash(panelsRef: RefObject<HTMLDivElement | null>, isKnown
           !panels.closest('.scene-entrance[data-intro="complete"]') || panels.querySelector(':modal')) {
         departure?.cancel();
         departure = undefined;
-        setHash(next);
+        setUrl(next);
         return;
       }
 
@@ -47,7 +48,7 @@ export function usePageHash(panelsRef: RefObject<HTMLDivElement | null>, isKnown
         departure = undefined;
 
         // A second navigation can update the destination while the current page leaves.
-        flushSync(() => setHash(readLocationHash()));
+        flushSync(() => setUrl(readLocationUrl()));
         animation.cancel();
         arrival = animatePageArrival(panels, direction);
       }, () => {});
@@ -56,14 +57,16 @@ export function usePageHash(panelsRef: RefObject<HTMLDivElement | null>, isKnown
     function updateMotion() {
       if (motion.matches) return;
       arrival?.cancel();
-      updateHash();
+      updateLocation();
     }
 
-    updateHash();
-    window.addEventListener('hashchange', updateHash);
+    updateLocation();
+    window.addEventListener('hashchange', updateLocation);
+    window.addEventListener('popstate', updateLocation);
     motion.addEventListener('change', updateMotion);
     return () => {
-      window.removeEventListener('hashchange', updateHash);
+      window.removeEventListener('hashchange', updateLocation);
+      window.removeEventListener('popstate', updateLocation);
       motion.removeEventListener('change', updateMotion);
       departure?.cancel();
       arrival?.cancel();
@@ -71,5 +74,5 @@ export function usePageHash(panelsRef: RefObject<HTMLDivElement | null>, isKnown
     };
   }, [panelsRef]);
 
-  return [hash, setHash] as const;
+  return [url, setUrl] as const;
 }

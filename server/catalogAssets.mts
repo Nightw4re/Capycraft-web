@@ -1,12 +1,24 @@
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { StatementSync } from 'node:sqlite';
 
 const root = resolve(import.meta.dirname, '..');
 const databaseName = 'catalog.sqlite';
 export const catalogStorage = 'sqlite';
+export const catalogPublishedAtHeader = 'X-Catalog-Published-At';
+
+export async function catalogPublishedAt(directory: string, manifest: { revision?: string; publishedAt?: number }) {
+  const { revision, publishedAt } = manifest;
+  if (typeof publishedAt === 'number' && Number.isFinite(new Date(publishedAt).getTime()) && publishedAt > 0) {
+    return new Date(publishedAt).toISOString();
+  }
+  const path = revision && /^[a-f0-9]{64}$/.test(revision)
+    ? join(directory, 'revisions', revision, 'catalog.json') : join(directory, 'catalog.json');
+  const metadata = await stat(path).catch(() => undefined);
+  return metadata?.mtime.toISOString();
+}
 
 export function catalogDatabasePath(revisionRoot: string) {
   const served = ['public', 'dist'].some(folder => {

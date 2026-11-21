@@ -19,15 +19,31 @@ export const dyeColors = {
 
 export type ButtonColor = keyof typeof dyeColors;
 export const buttonColors = Object.keys(dyeColors) as ButtonColor[];
-export type Language = 'cs' | 'en';
+export const languageOptions = [
+  { value: 'en', label: 'English', lang: 'en', flag: 'gb' },
+  { value: 'cs', label: 'Čeština', lang: 'cs', flag: 'cz' },
+] as const;
+export type Language = typeof languageOptions[number]['value'];
+
+export function isLanguage(value: unknown): value is Language {
+  return languageOptions.some(option => option.value === value);
+}
+
+export type TooltipModes = { advanced: true; shortcut?: undefined } | { advanced: false; shortcut?: string };
 
 export type Preferences = {
   language: Language;
   buttonColor: ButtonColor;
   introAnimation: boolean;
+  tooltipModes: TooltipModes;
 };
 
-export const defaultPreferences: Preferences = { language: 'en', buttonColor: 'green', introAnimation: true };
+export const defaultPreferences: Preferences = {
+  language: 'en',
+  buttonColor: 'green',
+  introAnimation: true,
+  tooltipModes: { advanced: false },
+};
 
 export const translations = {
   cs: {
@@ -50,6 +66,16 @@ export const translations = {
     playersLoading: 'Načítání seznamu hráčů…',
     playersEmpty: 'Zatím tu nejsou žádná jména hráčů.',
     playersLoadError: 'Seznam hráčů se nepodařilo načíst.',
+    onlinePlayers: 'Online hráči',
+    onlinePlayersListed: 'V online seznamu',
+    onlinePlayersEmpty: 'V online seznamu teď nejsou žádní hráči.',
+    onlinePlayersOffline: 'Herní server je nedostupný. Online seznam se obnoví po připojení.',
+    onlinePlayersUnavailable: 'Online seznam je dočasně nedostupný.',
+    onlinePlayersRestricted: 'Herní server nepovolil přístup k online seznamu.',
+    playerPing: 'Odezva',
+    playerPingGood: 'Dobrá',
+    playerPingFair: 'Střední',
+    playerPingHigh: 'Vysoká odezva',
     itemSearch: 'Hledat podle názvu nebo ID',
     itemMod: 'Mod',
     itemAllMods: 'Všechny mody',
@@ -58,6 +84,7 @@ export const translations = {
     itemLoading: 'Načítání katalogu…',
     itemCatalogUnavailable: 'Katalog předmětů zatím není k dispozici.',
     itemCatalogLanguage: 'Údaje o předmětech se načítají ze serveru a jsou vždy v angličtině.',
+    itemCatalogLanguageHide: 'Příště nezobrazovat',
     copyItemId: 'Kopírovat Minecraft ID',
     itemIdCopied: 'Minecraft ID je ve schránce.',
     itemIdCopyFailed: 'Minecraft ID se nepodařilo zkopírovat.',
@@ -75,11 +102,14 @@ export const translations = {
     itemEmpty: 'Žádné předměty neodpovídají hledání.',
     itemNotFound: 'Předmět se v katalogu nenašel.',
     itemPage: (page: string, total: string) => `Stránka ${page} z ${total}`,
+    itemPageJump: 'Přejít na stránku',
+    itemPageTotal: (total: string) => `z ${total}`,
     itemPrevious: 'Předchozí',
     itemNext: 'Další',
     itemVariants: 'Varianty',
     itemDefaultVariant: 'Výchozí vzhled',
     itemDetailsLoading: 'Načítání detailu předmětu…',
+    itemRecipePublished: 'Katalog zveřejněn',
     itemDetailsError: 'Detail předmětu se nepodařilo načíst.',
     itemRecipes: 'Recepty',
     itemFluid: 'Kapalina',
@@ -150,6 +180,7 @@ export const translations = {
     serverModpack: 'Modpack',
     serverPlayers: 'Hráči',
     serverUptime: 'Od spuštění',
+    serverTotalUptime: 'Celkem online',
     serverWorldAge: 'Stáří světa',
     serverAddress: 'Adresa serveru',
     copyServerAddress: (name: string) => `Kopírovat adresu serveru ${name}`,
@@ -195,6 +226,16 @@ export const translations = {
     playersLoading: 'Loading the player list…',
     playersEmpty: 'There are no player names yet.',
     playersLoadError: 'The player list could not load.',
+    onlinePlayers: 'Online players',
+    onlinePlayersListed: 'Listed online',
+    onlinePlayersEmpty: 'No players are currently listed online.',
+    onlinePlayersOffline: 'The game server is unreachable. The list will refresh when it reconnects.',
+    onlinePlayersUnavailable: 'The online player list is temporarily unavailable.',
+    onlinePlayersRestricted: 'The game server did not authorize access to the online player list.',
+    playerPing: 'Latency',
+    playerPingGood: 'Good',
+    playerPingFair: 'Fair',
+    playerPingHigh: 'High latency',
     itemSearch: 'Search by name or ID',
     itemMod: 'Mod',
     itemAllMods: 'All mods',
@@ -203,6 +244,7 @@ export const translations = {
     itemLoading: 'Loading the item catalog…',
     itemCatalogUnavailable: 'The item catalog is not available yet.',
     itemCatalogLanguage: 'Item data comes from the server and is always shown in English.',
+    itemCatalogLanguageHide: 'Do not show again',
     copyItemId: 'Copy Minecraft ID',
     itemIdCopied: 'Minecraft ID copied to the clipboard.',
     itemIdCopyFailed: 'Could not copy the Minecraft ID.',
@@ -220,11 +262,14 @@ export const translations = {
     itemEmpty: 'No items match your search.',
     itemNotFound: 'This item was not found in the catalog.',
     itemPage: (page: string, total: string) => `Page ${page} of ${total}`,
+    itemPageJump: 'Go to page',
+    itemPageTotal: (total: string) => `of ${total}`,
     itemPrevious: 'Previous',
     itemNext: 'Next',
     itemVariants: 'Variants',
     itemDefaultVariant: 'Default appearance',
     itemDetailsLoading: 'Loading item details…',
+    itemRecipePublished: 'Catalog published',
     itemDetailsError: 'Item details could not load.',
     itemRecipes: 'Recipes',
     itemFluid: 'Fluid',
@@ -295,6 +340,7 @@ export const translations = {
     serverModpack: 'Modpack',
     serverPlayers: 'Players',
     serverUptime: 'Uptime',
+    serverTotalUptime: 'Total time online',
     serverWorldAge: 'World age',
     serverAddress: 'Server address',
     copyServerAddress: (name: string) => `Copy the address of ${name}`,

@@ -18,7 +18,9 @@ export function ServerOverview({ servers }: { servers?: readonly MinecraftServer
     lastSeenAt: server.lastSeenAt,
     players: { current: server.playersOnline, max: server.maxPlayers },
     uptimeMinutes: server.uptimeSeconds === undefined ? undefined : Math.floor(server.uptimeSeconds / 60),
+    totalUptimeMinutes: server.totalUptimeSeconds === undefined ? undefined : Math.floor(server.totalUptimeSeconds / 60),
     worldAgeDays: server.worldAgeDays,
+    worldAgeMinutes: server.worldAgeMinutes,
     modpack: [server.modpack?.name, server.modpack?.version].filter(Boolean).join(' '),
   }));
 
