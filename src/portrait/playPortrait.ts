@@ -1,10 +1,11 @@
-import { createPortraitAnimation, distinctPlayerNames, type PortraitArrival } from './portraitAnimation';
+import { createPortraitAnimation, createPortraitTransition, distinctPlayerNames, type PortraitArrival } from './portraitAnimation';
 import { portraitCast } from './portraitCast';
 import { createPortraitRenderer } from './renderPortrait';
 import type { PortraitSkin } from './skinGeometry';
+import { stageWidth, type Actor, type PortraitFrame, type TimedFrame } from './portraitScene';
 
 export async function loadVisitorNames(server: string | undefined, signal: AbortSignal): Promise<string[]> {
-  const params = new URLSearchParams({ portrait: '1' });
+  const params = new URLSearchParams({ roster: '1' });
   if (server) params.set('server', server);
   try {
     const response = await fetch(`/api/players?${params}`, { signal });
@@ -16,6 +17,12 @@ export async function loadVisitorNames(server: string | undefined, signal: Abort
   }
 }
 
+function nameHash(name: string) {
+  let hash = 0x811c9dc5;
+  for (const letter of name.toLowerCase()) hash = Math.imul(hash ^ letter.charCodeAt(0), 0x01000193);
+  return hash >>> 0;
+}
+
 export async function playPortrait(
   stage: HTMLElement,
   canvas: HTMLCanvasElement,
@@ -23,6 +30,8 @@ export async function playPortrait(
   arrival: PortraitArrival | undefined,
   signal: AbortSignal,
   onError: () => void,
+  onActor: (name: string, fallback: boolean) => void,
+  rotateRoster = false,
 ) {
   const context = canvas.getContext('2d');
   if (!context || context.isContextLost?.()) throw new Error('Canvas is unavailable');
@@ -32,13 +41,15 @@ export async function playPortrait(
   const textureContext = texture.getContext('2d');
   if (!textureContext) throw new Error('Canvas is unavailable');
 
-  const loadSkin = async (name: string): Promise<[string, PortraitSkin]> => {
+  const loadSkin = async (name: string): Promise<PortraitSkin> => {
     const bundled = portraitCast.find(player => player.name.toLowerCase() === name.toLowerCase());
     let source = bundled?.skin.href;
     let model = bundled?.model;
     let objectUrl: string | undefined;
     if (!source) {
-      const response = await fetch(`/api/players?${new URLSearchParams({ skin: name })}`, { signal });
+      const response = await fetch(`/api/players?${new URLSearchParams({ skin: name })}`, {
+        signal: AbortSignal.any([signal, AbortSignal.timeout(6_000)]),
+      });
       if (!response.ok) throw new Error(`Skin unavailable for ${name}`);
       model = response.headers.get('X-Minecraft-Skin-Model') === 'slim' ? 'slim' : 'classic';
       objectUrl = URL.createObjectURL(await response.blob());
@@ -52,31 +63,96 @@ export async function playPortrait(
       if (skin.naturalWidth !== 64 || (!legacy && skin.naturalHeight !== 64)) throw new Error(`Invalid Java skin for ${name}`);
       textureContext.clearRect(0, 0, 64, 64);
       textureContext.drawImage(skin, 0, 0);
-      return [name, { pixels: textureContext.getImageData(0, 0, 64, 64).data, model: legacy ? 'legacy' : model ?? 'classic' }];
+      return { pixels: textureContext.getImageData(0, 0, 64, 64).data, model: legacy ? 'legacy' : model ?? 'classic' };
     } finally {
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     }
   };
 
-  const attempts = await Promise.allSettled(distinctPlayerNames(players).map(loadSkin));
-  let loaded = attempts.flatMap(result => result.status === 'fulfilled' ? [result.value] : []);
-  if (signal.aborted) return;
-  const useBundledCast = loaded.length === 0;
-  if (useBundledCast) loaded = await Promise.all(portraitCast.map(({ name }) => loadSkin(name)));
-  if (signal.aborted) return;
-
-  const names = loaded.map(([name]) => name);
-  const portraitFrames = createPortraitAnimation(names, arrival ?? (useBundledCast ? 'same' : 'next'));
-  const seatedFrame = portraitFrames[0].frame;
+  const names = distinctPlayerNames(players);
+  const rolling = rotateRoster && names.length > 0;
+  const active = new Map<string, PortraitSkin>();
+  const cache = new Map<string, PortraitSkin>();
+  let fallback: PortraitSkin | undefined;
+  let scene = arrival === 'same' ? -1 : 0;
+  let timeline: { frame: PortraitFrame; end: number }[];
   let cycleDuration = 0;
-  const timeline = portraitFrames.map(({ frame, duration }) => ({ frame, end: cycleDuration += duration }));
+  function loadTimeline(frames: TimedFrame<PortraitFrame>[]) {
+    cycleDuration = 0;
+    timeline = frames.map(({ frame, duration }) => ({ frame, end: cycleDuration += duration }));
+  }
 
-  const render = createPortraitRenderer(new Map(loaded));
+  function missingSkin(): PortraitSkin {
+    textureContext!.clearRect(0, 0, 64, 64);
+    textureContext!.fillStyle = '#7f9b9e';
+    textureContext!.fillRect(0, 0, 32, 16);
+    textureContext!.fillStyle = '#455963';
+    textureContext!.fillRect(0, 16, 64, 16);
+    textureContext!.fillStyle = '#24323a';
+    textureContext!.fillRect(10, 11, 1, 1);
+    textureContext!.fillRect(13, 11, 1, 1);
+    return { pixels: textureContext!.getImageData(0, 0, 64, 64).data, model: 'legacy' };
+  }
+
+  async function prefetch(name: string) {
+    const cached = cache.get(name);
+    if (cached) {
+      cache.delete(name);
+      cache.set(name, cached);
+      return;
+    }
+    const skin = await loadSkin(name).catch(() => fallback!);
+    if (signal.aborted) return;
+    if (cache.size >= 6) cache.delete(cache.keys().next().value!);
+    cache.set(name, skin);
+  }
+
+  function loadScene() {
+    const outgoing = names[Math.max(scene, 0) % names.length];
+    const incoming = names[(scene + 1) % names.length];
+    const outgoingSkin = active.get(outgoing) ?? cache.get(outgoing) ?? fallback!;
+    const incomingSkin = cache.get(incoming) ?? fallback!;
+    active.clear();
+    active.set(outgoing, outgoingSkin);
+    if (incoming !== outgoing) active.set(incoming, incomingSkin);
+    loadTimeline(createPortraitTransition(outgoing, incoming, arrival ?? 'next', scene));
+    const following = names[(scene + 2) % names.length];
+    if (following !== outgoing && following !== incoming) void prefetch(following);
+  }
+
+  if (rolling) {
+    names.sort((a, b) => nameHash(a) - nameHash(b) || a.localeCompare(b, 'en'));
+    fallback = missingSkin();
+    await Promise.all(names.slice(0, 2).map(prefetch));
+    if (signal.aborted) return;
+    loadScene();
+  } else {
+    const attempts = await Promise.allSettled(names.map(async name => [name, await loadSkin(name)] as const));
+    if (signal.aborted) return;
+    for (const result of attempts) if (result.status === 'fulfilled') active.set(...result.value);
+    const useBundledCast = active.size === 0;
+    if (useBundledCast) {
+      for (const { name } of portraitCast) active.set(name, await loadSkin(name));
+    }
+    if (signal.aborted) return;
+    loadTimeline(createPortraitAnimation([...active.keys()], arrival ?? (useBundledCast ? 'same' : 'next')));
+  }
+
+  const seatedFrame = timeline![0].frame;
+  const render = createPortraitRenderer(active);
   const raster = context.createImageData(canvas.width, canvas.height);
+  let announced: string | undefined;
   const draw = (frame: typeof seatedFrame) => {
     if (context.isContextLost?.()) throw new Error('Canvas context was lost');
     render(frame, raster);
     context.putImageData(raster, 0, 0);
+    const actor = frame.actors.reduce<Actor | undefined>((seen, next) =>
+      next.x > -24 && next.x < stageWidth + 24 ? next : seen, undefined);
+    if (actor && actor.player !== announced) {
+      const name = actor.player;
+      announced = name;
+      onActor(name, !!fallback && active.get(name) === fallback);
+    }
   };
 
   draw(seatedFrame);
@@ -98,9 +174,14 @@ export async function playPortrait(
   function drawNext() {
     if (!running || signal.aborted) return;
     const now = performance.now();
-    const elapsed = (now - startedAt) % cycleDuration;
-    const entry = timeline.find(({ end }) => end > elapsed)!;
     try {
+      if (rolling && now - startedAt >= cycleDuration) {
+        scene++;
+        loadScene();
+        startedAt = now;
+      }
+      const elapsed = (now - startedAt) % cycleDuration;
+      const entry = timeline.find(({ end }) => end > elapsed)!;
       if (entry.frame !== painted) {
         draw(entry.frame);
         painted = entry.frame;
@@ -128,7 +209,7 @@ export async function playPortrait(
       startedAt = now - pausedAt;
       drawNext();
     } else {
-      pausedAt = (now - startedAt) % cycleDuration;
+      pausedAt = rolling ? Math.min(now - startedAt, cycleDuration) : (now - startedAt) % cycleDuration;
     }
   }
 
@@ -148,5 +229,5 @@ export async function playPortrait(
   window.addEventListener('blur', () => { focused = false; syncVisibility(); }, { signal });
   window.addEventListener('focus', () => { focused = true; syncVisibility(); }, { signal });
   syncVisibility();
-  return names;
+  return true;
 }

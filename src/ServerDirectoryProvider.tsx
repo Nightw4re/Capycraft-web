@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { liveUpdatesPath, serverDirectoryPath, type CatalogSubscription, type CatalogUpdate, type LiveUpdate, type PlayersSubscription } from './liveUpdates.mts';
-import { isServerAlias } from './minecraftServers.mjs';
+import { applyDirectoryPatch, directorySubscription, isServerList } from './directoryUpdates.mts';
 import { readOnlinePlayersState, type OnlinePlayersState } from './onlinePlayers.mts';
 import type { ServerSummary } from './serverDirectoryTypes';
 
@@ -11,10 +11,6 @@ const subscriptionContext = createContext<(server: string) => (() => void)>(() =
 type SubscribePlayers = (server: string, update: (state: OnlinePlayersState) => void, disconnect: () => void) => () => void;
 const playersContext = createContext<SubscribePlayers>(() => () => {});
 const emptyServers: readonly ServerSummary[] = [];
-
-function isServerList(servers: unknown): servers is ServerSummary[] {
-  return Array.isArray(servers) && servers.every(server => isServerAlias(server?.alias) && Array.isArray(server.tabs));
-}
 
 function markDirectoryUnavailable(servers: readonly ServerSummary[] | undefined): Directory {
   return {
@@ -33,14 +29,16 @@ export function ServerDirectoryProvider({ children }: { children: ReactNode }) {
   const [directory, setDirectory] = useState<Directory>({ unavailable: false });
   const [catalog, setCatalog] = useState<CatalogUpdate>();
   const connection = useRef<WebSocket>(undefined);
-  const selection = useRef<CatalogSubscription>({ server: null });
+  const selection = useRef<CatalogSubscription>(undefined);
+  const sentCatalog = useRef<string>(undefined);
   const playersSelection = useRef<{ request: PlayersSubscription; update: Parameters<SubscribePlayers>[1]; disconnect: () => void }>(undefined);
   const nextSubscription = useRef(0);
 
   const sendSubscription = useCallback(() => {
-    if (connection.current?.readyState === WebSocket.OPEN) {
-      connection.current.send(JSON.stringify(selection.current));
-    }
+    const server = selection.current?.server ?? undefined;
+    if (connection.current?.readyState !== WebSocket.OPEN || server === sentCatalog.current) return;
+    connection.current.send(JSON.stringify({ server: server ?? null }));
+    sentCatalog.current = server;
   }, []);
 
   const sendPlayersSubscription = useCallback((request: PlayersSubscription) => {
@@ -64,7 +62,7 @@ export function ServerDirectoryProvider({ children }: { children: ReactNode }) {
     sendSubscription();
     return () => {
       if (selection.current !== subscription) return;
-      selection.current = { server: null };
+      selection.current = undefined;
       setCatalog(undefined);
       sendSubscription();
     };
@@ -79,11 +77,6 @@ export function ServerDirectoryProvider({ children }: { children: ReactNode }) {
     let receivedLiveDirectory = false;
     let disconnected = false;
     const baseline = new AbortController();
-    function sendSubscriptions() {
-      sendSubscription();
-      if (playersSelection.current) sendPlayersSubscription(playersSelection.current.request);
-    }
-
     void fetch(serverDirectoryPath, { signal: baseline.signal })
       .then(async response => {
         if (!response.ok) return;
@@ -96,21 +89,44 @@ export function ServerDirectoryProvider({ children }: { children: ReactNode }) {
 
     function connect() {
       const socket = new WebSocket(url);
+      let liveServers: ServerSummary[] | undefined;
       connection.current = socket;
       timeout = window.setTimeout(() => socket.close(), 5_000);
-      socket.addEventListener('open', sendSubscriptions);
+      socket.addEventListener('open', () => {
+        socket.send(JSON.stringify(directorySubscription));
+        sendSubscription();
+        if (playersSelection.current) sendPlayersSubscription(playersSelection.current.request);
+      });
       socket.addEventListener('message', event => {
-        if (connection.current !== socket || typeof event.data !== 'string') return;
+        if (connection.current !== socket || socket.readyState !== WebSocket.OPEN || typeof event.data !== 'string') return;
         let update: LiveUpdate;
-        try { update = JSON.parse(event.data); } catch { return; }
-        if (update?.type === 'servers' && isServerList(update.servers)) {
+        try { update = JSON.parse(event.data); } catch {
+          socket.close();
+          return;
+        }
+        if (update?.type === 'servers') {
+          if (!isServerList(update.servers)) {
+            socket.close();
+            return;
+          }
+          liveServers = update.servers;
           receivedLiveDirectory = true;
+          baseline.abort();
           disconnected = false;
           window.clearTimeout(timeout);
           delay = 1_000;
-          setDirectory({ servers: update.servers, unavailable: false });
+          setDirectory({ servers: liveServers, unavailable: false });
         }
-        if (update?.type === 'catalog' && update.server === selection.current.server) setCatalog(update);
+        if (update?.type === 'servers-patch') {
+          const servers = liveServers && applyDirectoryPatch(liveServers, update);
+          if (!servers) {
+            socket.close();
+            return;
+          }
+          liveServers = servers;
+          setDirectory({ servers, unavailable: false });
+        }
+        if (update?.type === 'catalog' && update.server === selection.current?.server) setCatalog(update);
         if (update?.type === 'players') {
           const selected = playersSelection.current;
           if (selected && selected.request.players === update.server && selected.request.subscription === update.subscription) {
@@ -122,6 +138,7 @@ export function ServerDirectoryProvider({ children }: { children: ReactNode }) {
       socket.addEventListener('close', () => {
         if (connection.current !== socket) return;
         connection.current = undefined;
+        sentCatalog.current = undefined;
         disconnected = true;
         window.clearTimeout(timeout);
         setCatalog(undefined);
@@ -136,7 +153,7 @@ export function ServerDirectoryProvider({ children }: { children: ReactNode }) {
       baseline.abort();
       const socket = connection.current;
       connection.current = undefined;
-      socket?.removeEventListener('open', sendSubscriptions);
+      sentCatalog.current = undefined;
       socket?.close();
       window.clearTimeout(timeout);
       window.clearTimeout(retry);

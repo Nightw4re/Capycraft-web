@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef, type ReactNode, type Ref } from 'react';
 import type { Page } from '../navigation';
+import { isServerPage } from '../minecraftServers.mjs';
 import { usePreferences } from '../PreferencesProvider';
 import { SceneBackground, SceneIslands } from './SceneBackground';
 import { SceneEntrance } from './SceneEntrance';
@@ -15,7 +16,7 @@ type WinterSceneProps = {
 
 export function WinterScene({ animate = true, children, page, server, onClearServer, panelsRef }: WinterSceneProps) {
   const { text } = usePreferences();
-  const label = page === 'items' || page === 'players' ? text[page]
+  const label = isServerPage(page) ? text[page]
     : page === 'notFound' ? text.pageErrors[404].title : text.information;
   const content = useRef<HTMLElement>(null);
 

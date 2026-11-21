@@ -11,6 +11,9 @@ import { isServerAlias } from './minecraftServers.mjs';
 import { catalogPageUrl, itemUrl, pageUrl, routeFromUrl, serverPath,
   type ItemRecipeView, type RecipeIngredientRoute } from './navigation';
 import { PlayerList } from './players/PlayerList';
+import { AchievementsPage } from './players/AchievementsPage';
+import { QuestsPage } from './players/QuestsPage';
+import { PonderPage } from './ponder/PonderPage';
 import { usePreferences } from './PreferencesProvider';
 import { useServerDirectory } from './ServerDirectoryProvider';
 import { NugwaPortrait } from './portrait/NugwaPortrait';
@@ -139,6 +142,9 @@ export function App() {
       onClearServer={clearServer} panelsRef={panels}>
       {page === 'notFound' && <PageError code={404} />}
       {route.page === 'players' && <PlayerList key={route.server} server={route.server} />}
+      {route.page === 'achievements' && <AchievementsPage key={route.server} server={route.server} />}
+      {route.page === 'quests' && <QuestsPage key={route.server} server={route.server} />}
+      {route.page === 'ponder' && <PonderPage key={route.server} server={route.server} />}
       <CatalogLanguageNotice active={page === 'items'} />
       {routeServer && (page === 'items' || item) && <ServerItems key={routeServer} server={routeServer}
         showCatalog={page === 'items'} page={catalogPage} query={catalogQuery} onPageChange={changeCatalogPage}

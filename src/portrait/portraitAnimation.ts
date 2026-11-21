@@ -21,17 +21,18 @@ function departureAndArrival(outgoing: string, incoming: string) {
   return [...withPlayer(departureFrames, outgoing), ...withPlayer(arrivalFrames, incoming)];
 }
 
+export function createPortraitTransition(outgoing: string, incoming: string, arrival: PortraitArrival, index: number) {
+  return outgoing === incoming || (arrival === 'next' && index % 2 === 0)
+    ? departureAndArrival(outgoing, incoming)
+    : blockScene(outgoing, incoming);
+}
+
 export function createPortraitAnimation(players: readonly string[], arrival: PortraitArrival = 'same'): TimedFrame<PortraitFrame>[] {
   const cast = distinctPlayerNames(players);
   const [first] = cast;
   if (!first) return [];
   if (cast.length === 1) return departureAndArrival(first, first);
 
-  const scenes = cast.flatMap((outgoing, index) => {
-    const incoming = cast[(index + 1) % cast.length];
-    return arrival === 'next' && index % 2 === 0
-      ? departureAndArrival(outgoing, incoming)
-      : blockScene(outgoing, incoming);
-  });
+  const scenes = cast.flatMap((outgoing, index) => createPortraitTransition(outgoing, cast[(index + 1) % cast.length], arrival, index));
   return arrival === 'same' ? [...departureAndArrival(first, first), ...scenes] : scenes;
 }

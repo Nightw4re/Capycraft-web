@@ -59,9 +59,13 @@ The optional `tabs` array controls the order and visibility of `items` and `play
 
 Set `"directoryTransport": "websocket"` in an instance's `server.json` to subscribe to its WebCraft information and status feeds. Both feeds must allow WebSocket access. In WebCraft, use `BOTH` or `WEBSOCKET` as the effective transport for each feed. The Node API uses the configured exposure for each subscription, sends the machine token only to the internal WebCraft endpoint, and resubscribes for fresh snapshots after disconnects. The default `"http"` checks both feeds on startup and about once a minute. This setting applies to the server directory. Player history still uses its own HTTP requests.
 
-Run `npm run start:api` to populate the overview and selector. The overview shows configured instances by alias while waiting for their first WebCraft response. An instance appears in the selector after its first server information response or when part of its Items catalog is available. An instance still waiting for WebCraft offers only Items if its configuration enables that tab. Items shows import progress and lets visitors browse items already published. Capycraft keeps the last successful server information and time of contact in the SQLite database used for player history. During a later outage the card shows the cached name, icon, join address, player limit, accumulated time online, and world age when available. The current player count shows a dash. The status tooltip includes the last known connection time during the outage. The card shows the server message under its name and a colored status dot with a label on hover, focus, or tap. When WebCraft reports the instance ready, the card displays the available player count and limit, accumulated time online and world age as inline statistics that wrap on narrow screens. The card and header picker show the server icon when WebCraft supplies one. Capycraft requests `iconFormat=webp` when reading `server-info` and accepts a PNG or WebP base64 data URL in `serverIcon`, up to 96,000 characters. The card enables copying when an address is available. Open Items from the header after selecting an instance. The browser requests an initial public directory from `GET /api/servers` and opens `/api/live` on the same Capycraft origin. The WebSocket sends the current directory on connection and sends updates as the directory changes. The browser reconnects automatically after a disconnect. Vite proxies both paths locally. In production, reverse proxy both paths to the Node service through Caddy.
+Run `npm run start:api` to populate the overview and selector. The overview shows configured instances by alias while waiting for their first WebCraft response. An instance appears in the selector after its first server information response. A published Items catalog or a configured live Players, Achievements, Quests, or Ponder tab also makes the instance selectable while its information feed is unavailable. Items shows import progress and lets visitors browse items already published. Capycraft keeps the last successful server information and time of contact in the SQLite database used for player history. During a later outage the card shows the cached name, icon, join address, player limit, accumulated time online, and world age when available. The current player count shows a dash. The status tooltip includes the last known connection time during the outage. The card shows the server message under its name and a colored status dot with a label on hover, focus, or tap. When WebCraft reports the instance ready, the card displays the available player count and limit, accumulated time online and world age as inline statistics that wrap on narrow screens. The card and header picker show the server icon when WebCraft supplies one. Capycraft requests `iconFormat=webp` when reading `server-info` and accepts a PNG or WebP base64 data URL in `serverIcon`, up to 96,000 characters. The card enables copying when an address is available. Open Items from the header after selecting an instance. The browser requests an initial public directory from `GET /api/servers` and opens `/api/live` on the same Capycraft origin. The WebSocket sends the current directory on subscription and sends patches as the directory changes. The browser reconnects automatically after a disconnect. Vite proxies both paths locally. In production, reverse proxy both paths to the Node service through Caddy.
 
 Total time online uses WebCraft's `totalUptimeSeconds` to show accumulated time across sessions. It excludes downtime and displays the last reported total during an outage. Feeds that only provide session uptime show it under Uptime while the instance is ready. Total time online, session uptime, and world age use hours and minutes below one day and days and hours from one day onward when the feed provides minute-level precision. Older feeds that publish only `worldAgeDays` still show whole days.
+
+On each connection to `/api/live`, the browser sends `{"directory":"subscribe"}`. The API replies with a full `{"type":"servers","servers":[...]}` snapshot. Later `servers-patch` frames have `added` (full entries), `removed` (aliases), and `changed` (objects with `alias`, a `set` object, and a `remove` array of field names). The browser applies patches to the current socket's snapshot and reconnects for a new snapshot if a patch is invalid. Seconds within the same displayed minute and changes to the last-contact timestamp while the server is healthy do not trigger a frame on their own. The HTTP directory still includes exact values.
+
+Deploy the frontend and Node API from the same revision for this protocol. Node requests delta subscriptions upstream only when the WebCraft upgrade advertises `X-WebCraft-Subscription-Updates: delta`. It continues accepting full snapshots and updates from older WebCraft versions.
 
 ### First deployment without Minecraft instances
 
@@ -94,6 +98,40 @@ WEBCRAFT_PLAYER_FEEDS='[{"server":"universum","url":"http://127.0.0.1:8765/api/v
 ```
 
 The API stores data at `data/players.sqlite` by default. Set `CAPYCRAFT_PLAYER_DATABASE` to use a different path. WebCraft records logins after the feature is enabled. Earlier logins would need a separate import from existing records.
+
+## Achievements and lifetime roster
+
+The **Achievements** tab opens at `/server/<alias>/achievements`. It loads the visible advancement catalog once and shows the number available. Choose a saved player name to request that player's progress. Unavailable progress is shown as an error. Hidden advancements, recipes, and entries without display metadata are excluded by WebCraft.
+
+To publish the tab, set `"achievements": true` and include `"achievements"` in the instance's private `tabs` list. Set `"playerRoster": true` to collect known names for the player picker and dashboard. Enable `advancementsEnabled` and `playerRosterEnabled` in WebCraft, allow HTTP access to both feeds, and configure the same machine token through the instance's `tokenEnv`. Both feeds remain on the private side of the proxy. Restart the Node API after changing instance definitions.
+
+Node imports enabled rosters at startup and about once a minute into the player SQLite database. Dated player history takes precedence for the same UUID. Undated roster names are ordered by when Capycraft first saw that spelling or saw it change. The selected server uses its own known names. The aggregate dashboard merges across worlds and collapses duplicate names case-insensitively. Unknown names are skipped. A player whose name is no longer known to WebCraft may be missing from the picker, or a previously cached name may no longer resolve to progress after server data changes.
+
+The public `GET /api/players?roster=1` returns only `{"players":["ExamplePlayer"]}`. Add `server=<alias>` to scope it. `GET /api/achievements?server=<alias>` returns `total` and `advancements` with `id`, `title`, `description`, and `frame`. Add `player=<name>` to request `player`, `completed`, and `completedIds` for a name recorded on that instance. Unknown players get HTTP 404. Achievement responses support up to 25,000 entries, with IDs and titles up to 512 characters and descriptions up to 4,096 characters. Vite forwards these GET requests. Use the Caddy matchers below for direct links and the API in production.
+
+Run `node --test tests/achievements.test.mts` to verify roster persistence, instance and player access, and the catalog and progress responses.
+
+## FTB Quests
+
+The **Quests** tab opens at `/server/<alias>/quests`. It requests the visible FTB quest catalog when opened, groups the quests by chapter, and shows the total number visible. Selecting a known player makes a second HTTP request for the shared progress of that player's FTB team. The page counts completions within the same visible catalog. WebCraft applies FTB's default visibility, so hidden quests and quests gated by dependencies are excluded.
+
+Install the WebCraft Quests addon on a server with FTB Quests and add `webcraft_quests:quests` to WebCraft's `enabledModules`. Allow HTTP access to its machine-only `/api/v1/internal/modules/webcraft_quests/quests/data` route. In Capycraft's private `server.json`, set `"quests": true`, add `"quests"` to `tabs`, and set `tokenEnv` to the environment variable containing the WebCraft machine token. Set `"playerRoster": true` and enable WebCraft's player roster feed over HTTP to populate the picker from the world's saved names. Restart the Node API after editing the instance definition.
+
+`GET /api/quests?server=<alias>` returns `total` and `chapters`, with chapter IDs and titles and each quest's ID, title, and description. Add `player=<name>` to receive the matched game name, `completed`, and `completedIds`. Capycraft resolves the name within that instance using the private roster and player history. Unknown or ambiguous names and a team without saved progress receive distinct HTTP 404 states. Only the private upstream request contains the UUID and machine token. The public response includes no team name.
+
+Run `node --test tests/quests.test.mts` to verify instance opt-in, private player resolution, public response fields, and failed progress.
+
+## Ponder scene playback
+
+The optional **Ponder** tab opens at `/server/<alias>/ponder`. Search the scene titles, schematics, or associated item IDs, select a scene, and use the playback controls, timeline, or previous and next keyframe buttons. The player draws exported frame geometry and textures in WebGL 2 and shows the exported captions in the capture language.
+
+Install the WebCraft Ponder add-on with WebCraft Core. While the game server is stopped, place the Ponder v1 export at `webcraft-assets/previews.zip` in its server directory and add `webcraft_ponder:ponder` to `enabledModules`. Allow HTTP access to the module's public `index` and `asset` routes at `/api/v1/modules/webcraft_ponder/ponder/`. Set `"ponder": true` and include `"ponder"` in the instance's private `tabs` list, then restart the Capycraft Node API. The module's published exports are visible to visitors of that instance.
+
+The browser uses `GET /api/ponder?server=<alias>` and adds `path=<encoded export entry>` for a manifest, frame, or hashed resource. The API accepts scene manifests, numbered frames, and content-addressed meshes, PNGs, texture metadata, and picking data under the Ponder export directory. It validates resource types, byte limits, PNG dimensions, and hashes. Exposure is limited to configured aliases.
+
+Playback uses built-in shader equivalents for common opaque, cutout, translucent, text, and entity draws, in capture order. Animated atlases use the captured still texture; animated geometry and particles recorded in each frame still move. The viewer flags draws it cannot play. Picking, free camera controls, custom Minecraft shaders, and exact lighting and fog are outside this player.
+
+Run `node --test tests/ponder.test.mts` to check v1 parsing, opt-in, and the proxy's resource allowlist.
 
 ## Items catalog
 
@@ -210,7 +248,7 @@ The Capycraft Web release can go out independently of WebCraft. For a Web-only u
 Merge these handlers into the existing site block and set its `root` to the absolute path to the release's `dist/`. Retain the site's existing TLS setup and static file handler. Merge equivalent matchers to avoid duplicate routes. Place the site handlers before any unconditional catch-all in a `route` block. Caddy's `reverse_proxy` handles the WebSocket upgrade on `/api/live`.
 
 ```caddyfile
-@capycraftApi path /api/servers /api/players /api/item-search /api/item-recipe-uses /api/live /item-catalog/*
+@capycraftApi path /api/servers /api/players /api/achievements /api/quests /api/ponder /api/item-search /api/item-recipe-uses /api/live /item-catalog/*
 handle @capycraftApi {
   reverse_proxy 127.0.0.1:8787
 }
@@ -220,7 +258,7 @@ handle @capycraftItemPages {
   reverse_proxy 127.0.0.1:8787
 }
 
-@capycraftPages path_regexp capycraftPages ^/(server/[a-z0-9-]+(/(items|players))?|404)/?$
+@capycraftPages path_regexp capycraftPages ^/(server/[a-z0-9-]+(/(items|players|achievements|quests|ponder))?|404)/?$
 handle @capycraftPages {
   rewrite * /index.html
   file_server
@@ -275,7 +313,9 @@ In the [grass block scene](src/portrait/blockScene.ts), the block rolls to the l
 
 The [renderer](src/portrait/renderPortrait.ts) adapts WebCraft Armor Preview's expanded outer skin, depth testing, nearest-neighbor texture sampling, and two-light shading. It supersamples the outlines to smooth the edges in motion.
 
-[NugwaPortrait](src/portrait/NugwaPortrait.tsx) uses up to ten distinct recent visitors to the selected server, or across all servers when no server is selected. It accepts an explicit `players` list in playback order. Set `arrival` to `same` to open with the same player returning, or `next` to alternate the departure-and-arrival scene with the grass block scene. A cast of one always plays the departure and return. The API looks up recorded usernames through Minecraft's profile and texture services. Players without a loadable custom skin are skipped. If no visitor skins load, the canvas uses the bundled cast.
+[NugwaPortrait](src/portrait/NugwaPortrait.tsx) cycles through all distinct known names for the selected server, or across enabled rosters and historical names when no server is selected. It loads the first two skins, prefetches one future skin at a time, and keeps up to six in the portrait cache. The name changes when a new character comes into view. A player with an unavailable skin appears as a labeled placeholder. If the roster has no names, the canvas uses the bundled cast. The API looks up recorded usernames through Minecraft's profile and texture services.
+
+An explicit `players` list keeps its supplied playback order and skips unavailable skins. Set `arrival` to `same` to open with the same player returning, or `next` to alternate the departure-and-arrival scene with the grass block scene. A cast of one always plays the departure and return.
 
 The canvas plays while the card and browser window are active. Playback resumes from the same point after switching windows or scrolling away. If the canvas fails, the card loads the transparent [animated PNG](assets/nugwa-animated.png). The transparent [seated PNG](assets/nugwa-seated.png) is shown while the canvas loads and whenever reduced motion is enabled. Both exported images use the bundled cast and the same renderer and motion as the canvas. They are served as static assets and can be hosted independently.
 

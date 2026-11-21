@@ -11,10 +11,13 @@ import { catalogPrefix } from './server/itemCatalog.mts';
 import { createItemPages, itemPageProxyPattern } from './server/itemPages.mts';
 import { serverDirectoryPath } from './server/serverDirectory.mts';
 import { liveUpdatesPath } from './src/liveUpdates.mts';
+import { achievementsPath } from './src/achievements.mts';
+import { questsPath } from './src/quests.mts';
+import { ponderPath } from './src/ponder/format.mts';
 import { catalogSubdirectory } from './src/minecraftServers.mjs';
 
 const apiOrigin = 'http://127.0.0.1:8787';
-const apiPaths = [serverDirectoryPath, '/api/players', itemSearchPath, itemRecipeUsesPath];
+const apiPaths = [serverDirectoryPath, '/api/players', achievementsPath, questsPath, ponderPath, itemSearchPath, itemRecipeUsesPath];
 const proxy = {
   [`^${liveUpdatesPath}$`]: { target: apiOrigin, ws: true },
   [catalogPrefix]: apiOrigin,

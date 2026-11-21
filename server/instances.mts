@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, readdirSync, type Dirent } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { catalogSubdirectory, defaultAlias, defaultTabs, isServerAlias, type ServerPage } from '../src/minecraftServers.mjs';
+import { catalogSubdirectory, defaultAlias, defaultTabs, isServerAlias, isServerPage, type ServerPage } from '../src/minecraftServers.mjs';
 
 export type Exposure = 'public' | 'internal';
 
@@ -17,6 +17,10 @@ export type Instance = {
     directoryTransport: 'http' | 'websocket';
     onlinePlayersTransport?: 'http' | 'websocket';
     playerHistory: boolean;
+    playerRoster?: boolean;
+    achievements?: boolean;
+    quests?: boolean;
+    ponder?: boolean;
   };
 };
 
@@ -97,11 +101,19 @@ function parseInstance(folder: string, value: unknown, directory: string): Insta
     throw new Error('Feed exposure must be public or internal.');
   }
   const playerHistory = 'playerHistory' in value ? value.playerHistory : false;
+  const playerRoster = 'playerRoster' in value ? value.playerRoster : false;
+  const achievements = 'achievements' in value ? value.achievements : false;
+  const quests = 'quests' in value ? value.quests : false;
+  const ponder = 'ponder' in value ? value.ponder : false;
   const onlinePlayersTransport = 'onlinePlayersTransport' in value ? value.onlinePlayersTransport : undefined;
   if (onlinePlayersTransport !== undefined && onlinePlayersTransport !== 'http' && onlinePlayersTransport !== 'websocket') {
     throw new Error('onlinePlayersTransport must be http or websocket.');
   }
-  if (typeof playerHistory !== 'boolean' || (!tokenEnv && (info === 'internal' || status === 'internal' || playerHistory || onlinePlayersTransport))) {
+  if (typeof playerHistory !== 'boolean' || typeof playerRoster !== 'boolean'
+    || typeof achievements !== 'boolean' || typeof quests !== 'boolean' || typeof ponder !== 'boolean') {
+    throw new Error('Player history, player roster, achievements, quests and Ponder settings must be boolean.');
+  }
+  if (!tokenEnv && (info === 'internal' || status === 'internal' || playerHistory || playerRoster || achievements || quests || onlinePlayersTransport)) {
     throw new Error('Internal feeds require tokenEnv.');
   }
   const directoryTransport = 'directoryTransport' in value ? value.directoryTransport : 'http';
@@ -109,12 +121,15 @@ function parseInstance(folder: string, value: unknown, directory: string): Insta
     throw new Error('directoryTransport must be http or websocket.');
   }
   const tabs = 'tabs' in value ? value.tabs : defaultTabs;
-  if (!Array.isArray(tabs) || !tabs.every(tab => tab === 'items' || tab === 'players') || new Set(tabs).size !== tabs.length) {
-    throw new Error('tabs must list items and players at most once each.');
+  if (!Array.isArray(tabs) || !tabs.every(isServerPage) || new Set(tabs).size !== tabs.length
+    || (tabs.includes('achievements') && !achievements) || (tabs.includes('quests') && !quests)
+    || (tabs.includes('ponder') && !ponder)) {
+    throw new Error('tabs must list enabled items, players, achievements, quests or Ponder at most once each.');
   }
   return {
     alias, tabs, inbox: join(directory, 'imports'), catalog: join(directory, 'catalog'),
-    webcraft: { origin: url.origin, tokenEnv, info, status, directoryTransport, onlinePlayersTransport, playerHistory },
+    webcraft: { origin: url.origin, tokenEnv, info, status, directoryTransport, onlinePlayersTransport,
+      playerHistory, playerRoster, achievements, quests, ponder },
   };
 }
 

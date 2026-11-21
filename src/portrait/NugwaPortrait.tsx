@@ -19,11 +19,10 @@ export function NugwaPortrait({ players, server, arrival }: {
   const stage = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const [mode, setMode] = useState<'still' | 'canvas' | 'image'>('still');
-  const [playedNames, setPlayedNames] = useState(bundledNames);
-  const names = mode === 'canvas' ? playedNames : bundledNames;
-  const label = mode === 'still' || names.length === 1
-    ? text.portraitCharacter(names[0])
-    : text.portraitPlayers(names.join(', '));
+  const [actor, setActor] = useState({ name: bundledNames[0], fallback: false });
+  const shown = mode === 'canvas' ? actor : { name: bundledNames[0], fallback: false };
+  const label = mode === 'image' ? text.portraitPlayers(bundledNames.join(', '))
+    : shown.fallback ? text.portraitFallback(shown.name) : text.portraitCharacter(shown.name);
 
   useEffect(() => {
     const container = stage.current;
@@ -49,9 +48,9 @@ export function NugwaPortrait({ players, server, arrival }: {
       const start = async () => {
         const names = players ?? await loadVisitorNames(server, controller.signal);
         if (controller.signal.aborted) return;
-        const loaded = await playPortrait(container, element, names, arrival, controller.signal, showImage);
+        const loaded = await playPortrait(container, element, names, arrival, controller.signal, showImage,
+          (name, fallback) => { if (!controller.signal.aborted) setActor({ name, fallback }); }, players === undefined);
         if (!loaded || controller.signal.aborted) return;
-        setPlayedNames(loaded);
         setMode('canvas');
       };
       void start().catch(showImage);
@@ -76,6 +75,9 @@ export function NugwaPortrait({ players, server, arrival }: {
           }} />
         </picture>
       )}
+      {mode !== 'image' && <span className="player-portrait-name" aria-hidden="true">
+        {shown.name}{shown.fallback && <small>{text.portraitSkinUnavailable}</small>}
+      </span>}
     </div>
   );
 }

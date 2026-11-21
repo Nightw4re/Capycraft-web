@@ -209,6 +209,9 @@ export function createServerDirectory(
       if (webcraft && !snapshot.information) {
         const catalog = catalogs.get(alias);
         const onlinePlayers = webcraft.onlinePlayersTransport && tabs.includes('players');
+        const achievements = webcraft.achievements && tabs.includes('achievements');
+        const quests = webcraft.quests && tabs.includes('quests');
+        const ponder = webcraft.ponder && tabs.includes('ponder');
         let items = false;
         if (catalog && tabs.includes('items')) {
           const manifest = await readFile(join(catalog, 'catalog.json'), 'utf8').then(text => fields(JSON.parse(text))).catch(() => undefined);
@@ -216,10 +219,12 @@ export function createServerDirectory(
             && typeof manifest.total === 'number' && manifest.total > 0;
           items = manifest?.state === 'ready' || !!hasPublishedItems;
         }
+        const availableTabs = { items, players: onlinePlayers, achievements, quests, ponder };
         return {
           alias, status: snapshot.status, lastSeenAt: snapshot.lastSeenAt,
-          tabs: tabs.filter(tab => tab === 'items' ? items : onlinePlayers),
-          access: items ? 'catalog' : onlinePlayers ? 'players' : 'pending',
+          tabs: tabs.filter(tab => availableTabs[tab]),
+          access: items ? 'catalog' : onlinePlayers ? 'players' : achievements ? 'achievements'
+            : quests ? 'quests' : ponder ? 'ponder' : 'pending',
         };
       }
       const { playersOnline, uptimeSeconds, ...information } = snapshot.information ?? {};

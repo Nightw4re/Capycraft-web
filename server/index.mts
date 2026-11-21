@@ -14,12 +14,17 @@ import { attachLiveUpdates } from './liveUpdates.mts';
 import { defaultAlias } from '../src/minecraftServers.mjs';
 import { downloadMinecraftSkin } from './minecraftSkin.mts';
 import { createOnlinePlayers } from './onlinePlayers.mts';
+import { achievementsPath } from '../src/achievements.mts';
+import { createAchievements } from './achievements.mts';
+import { questsPath } from '../src/quests.mts';
+import { createQuests } from './quests.mts';
+import { ponderPath } from '../src/ponder/format.mts';
+import { createPonder } from './ponder.mts';
+import { createPlayerRoster, playerNamePattern, uuidPattern } from './playerRoster.mts';
 
 const pollIntervalMs = 60_000;
 const importPollIntervalMs = 30_000;
 const requestTimeoutMs = 5_000;
-const uuidPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
-const playerNamePattern = /^[A-Za-z0-9_]{1,16}$/;
 const instancesRoot = instanceDirectory(process.env.CAPYCRAFT_INSTANCE_DIR);
 mkdirSync(instancesRoot, { recursive: true });
 const instances = loadInstances(instancesRoot);
@@ -95,6 +100,10 @@ if (!hasServerPlayers && instances.has(defaultAlias)) {
   database.prepare('INSERT INTO server_players SELECT ?, uuid, name, last_seen_at FROM players').run(defaultAlias);
 }
 database.exec('COMMIT');
+const roster = createPlayerRoster(database, instances);
+const serveAchievements = createAchievements(instances, roster.getNames);
+const serveQuests = createQuests(instances, roster.resolvePlayer);
+const servePonder = createPonder(instances);
 
 const savePlayer = database.prepare(`
   INSERT INTO players (uuid, name, last_seen_at) VALUES (?, ?, ?)
@@ -170,7 +179,7 @@ async function syncFeed({ url, token, server }: (typeof feeds)[number]) {
 }
 
 async function syncPlayers() {
-  await Promise.all(feeds.map(async feed => {
+  const histories = feeds.map(async feed => {
     try {
       await syncFeed(feed);
     } catch (error) {
@@ -179,8 +188,9 @@ async function syncPlayers() {
         : 'Could not load or store the player feed.';
       console.warn(`WebCraft player sync at ${feed.url.origin}: ${message}`);
     }
-  }));
-  setTimeout(() => void syncPlayers(), pollIntervalMs);
+  });
+  await Promise.all([...histories, roster.sync()]);
+  setTimeout(() => void syncPlayers(), pollIntervalMs).unref();
 }
 
 function pollItemImports(server: string, inbox: string) {
@@ -216,6 +226,9 @@ const api = createServer(async (request, response) => {
   const path = request.url?.split('?', 1)[0];
   if (serveItemPage(request, response, path)) return;
   if (path === serverDirectoryPath) return void directory.serve(request, response);
+  if (path === achievementsPath) return void serveAchievements(request, response);
+  if (path === questsPath) return void serveQuests(request, response);
+  if (path === ponderPath) return void servePonder(request, response);
   if (path?.startsWith(catalogPrefix)) {
     void serveCatalog(catalogs, path.slice(catalogPrefix.length), request, response);
     return;
@@ -252,7 +265,7 @@ const api = createServer(async (request, response) => {
     }
     const skin = params.get('skin');
     if (skin !== null) {
-      if (!playerNamePattern.test(skin) || !(online ? await onlinePlayers.lists(server!, skin) : findPlayerName.get(skin))) {
+      if (!playerNamePattern.test(skin) || !(online ? await onlinePlayers.lists(server!, skin) : findPlayerName.get(skin) || roster.knowsSkin(skin))) {
         response.writeHead(404).end(JSON.stringify({ error: 'player_not_found' }));
         return;
       }
@@ -261,6 +274,10 @@ const api = createServer(async (request, response) => {
     }
     if (online) {
       response.end(JSON.stringify(await onlinePlayers.get(server!)));
+      return;
+    }
+    if (params.get('roster') === '1') {
+      response.end(JSON.stringify({ players: await roster.getNames(server ?? undefined) }));
       return;
     }
     const portrait = params.get('portrait') === '1';
@@ -287,5 +304,5 @@ api.listen(8787, '127.0.0.1', () => {
     if (inbox) inboxes.set(inbox, alias);
   }
   for (const [inbox, alias] of inboxes) pollItemImports(alias, inbox);
-  if (feeds.length > 0) void syncPlayers();
+  if (feeds.length > 0 || roster.configured) void syncPlayers();
 });

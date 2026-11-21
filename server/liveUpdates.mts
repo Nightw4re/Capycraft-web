@@ -4,9 +4,11 @@ import type { Server } from 'node:http';
 import { join } from 'node:path';
 import { WebSocket, WebSocketServer } from 'ws';
 import layout from '../src/items/catalogLayout.json' with { type: 'json' };
+import { directorySubscription } from '../src/directoryUpdates.mts';
 import { liveUpdatesPath, type ImportStatus, type LiveUpdate } from '../src/liveUpdates.mts';
 import type { ServerSummary } from '../src/serverDirectoryTypes.ts';
 import type { createOnlinePlayers } from './onlinePlayers.mts';
+import { directoryMessage } from './directoryUpdates.mts';
 
 function send(client: WebSocket, message: string) {
   if (client.readyState !== WebSocket.OPEN) return;
@@ -14,12 +16,14 @@ function send(client: WebSocket, message: string) {
   else client.send(message);
 }
 
-function createFeed(read: () => Promise<LiveUpdate>) {
-  const clients = new Map<WebSocket, string | undefined>();
+function createFeed<T>(read: () => Promise<T>, encode: (current: T, previous?: T) => string | undefined) {
+  const clients = new Map<WebSocket, { initialized: boolean }>();
+  let previous: T | undefined;
   let reading = false;
   let pending = false;
 
   async function refresh() {
+    if (!clients.size) return;
     pending = true;
     if (reading) return;
     reading = true;
@@ -27,13 +31,17 @@ function createFeed(read: () => Promise<LiveUpdate>) {
       while (pending) {
         pending = false;
         try {
-          const subscribers = Array.from(clients.keys());
-          const message = JSON.stringify(await read());
-          for (const client of subscribers) {
-            if (!clients.has(client) || clients.get(client) === message) continue;
-            clients.set(client, message);
-            send(client, message);
+          const subscribers = Array.from(clients);
+          const current = await read();
+          const update = previous === undefined ? undefined : encode(current, previous);
+          let initial: string | undefined;
+          for (const [client, subscription] of subscribers) {
+            if (clients.get(client) !== subscription) continue;
+            const message = subscription.initialized ? update : initial ??= encode(current);
+            subscription.initialized = true;
+            if (message !== undefined) send(client, message);
           }
+          previous = current;
         } catch (error) {
           console.warn('Could not update live status.', error);
         }
@@ -46,7 +54,7 @@ function createFeed(read: () => Promise<LiveUpdate>) {
   return {
     refresh,
     subscribe(client: WebSocket) {
-      clients.set(client, undefined);
+      clients.set(client, { initialized: false });
       void refresh();
       return () => { clients.delete(client); };
     },
@@ -78,13 +86,13 @@ export function attachLiveUpdates(api: Server, snapshot: () => Promise<ServerSum
   onlinePlayers: ReturnType<typeof createOnlinePlayers>,
 ) {
   const sockets = new WebSocketServer({ noServer: true, maxPayload: 256 });
-  const directory = createFeed(async () => ({ type: 'servers', servers: await snapshot() }));
+  const directory = createFeed(snapshot, directoryMessage);
   const stopWatching: (() => void)[] = [];
   const feeds = new Map(Array.from(catalogs, ([server, path]) => {
     const manifest = join(path, 'catalog.json');
     const statusPath = join(path, layout.statusFile);
     let expiry: NodeJS.Timeout | undefined;
-    const feed = createFeed(async (): Promise<LiveUpdate> => {
+    const feed = createFeed(async () => {
       const [file, text] = await Promise.all([
         stat(manifest, { bigint: true }).catch(ignoreMissing),
         readFile(statusPath, 'utf8').catch(ignoreMissing),
@@ -97,8 +105,8 @@ export function attachLiveUpdates(api: Server, snapshot: () => Promise<ServerSum
         else expiry = setTimeout(() => void feed.refresh(), remaining).unref();
       }
       const version = file ? `${file.ino}:${file.mtimeNs}:${file.size}` : null;
-      return { type: 'catalog', server, version, status };
-    });
+      return JSON.stringify({ type: 'catalog', server, version, status } satisfies LiveUpdate);
+    }, (current, previous) => current === previous ? undefined : current);
     try {
       mkdirSync(path, { recursive: true });
       const watcher = watch(path, { persistent: false }, (_event, name) => {
@@ -128,7 +136,7 @@ export function attachLiveUpdates(api: Server, snapshot: () => Promise<ServerSum
     alive.add(client);
     client.on('pong', () => alive.add(client));
     client.on('error', () => client.terminate());
-    const unsubscribeDirectory = directory.subscribe(client);
+    let unsubscribeDirectory: (() => void) | undefined;
     let unsubscribeCatalog: (() => void) | undefined;
     let unsubscribePlayers: (() => void) | undefined;
     client.on('message', (message, binary) => {
@@ -136,6 +144,9 @@ export function attachLiveUpdates(api: Server, snapshot: () => Promise<ServerSum
       try {
         const data: unknown = JSON.parse(message.toString());
         if (!data || typeof data !== 'object') return;
+        if ('directory' in data && data.directory === directorySubscription.directory) {
+          unsubscribeDirectory ??= directory.subscribe(client);
+        }
         if ('server' in data && (data.server === null || (typeof data.server === 'string' && feeds.has(data.server)))) {
           unsubscribeCatalog?.();
           unsubscribeCatalog = typeof data.server === 'string' ? feeds.get(data.server)?.subscribe(client) : undefined;
@@ -155,7 +166,7 @@ export function attachLiveUpdates(api: Server, snapshot: () => Promise<ServerSum
     });
     client.on('close', () => {
       alive.delete(client);
-      unsubscribeDirectory();
+      unsubscribeDirectory?.();
       unsubscribeCatalog?.();
       unsubscribePlayers?.();
     });

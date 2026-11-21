@@ -12,7 +12,9 @@ import { type Instance } from '../server/instances.mts';
 import { attachLiveUpdates } from '../server/liveUpdates.mts';
 import { createOnlinePlayers } from '../server/onlinePlayers.mts';
 import { createServerDirectory } from '../server/serverDirectory.mts';
+import { applyDirectoryPatch, directorySubscription } from '../src/directoryUpdates.mts';
 import type { LiveUpdate } from '../src/liveUpdates.mts';
+import type { ServerSummary } from '../src/serverDirectoryTypes.ts';
 
 const token = 'test_'.repeat(10);
 const tokenEnv = 'CAPYCRAFT_TEST_ROSTER_TOKEN';
@@ -85,6 +87,7 @@ test('WebSocket sends live snapshots, scopes subscriptions and keeps catalog upd
   let snapshot = { players: [{ name: 'Listed', pingMillis: 0, private: token }] };
   const upstream = createServer((_request, response) => { requests++; response.writeHead(500).end(); });
   const ws = new WebSocketServer({ noServer: true });
+  ws.on('headers', headers => headers.push('X-WebCraft-Subscription-Updates: delta'));
   const publish = (socket: WebSocket, type: 'snapshot' | 'update', body: unknown, status = 200) =>
     socket.send(JSON.stringify({ id: 'online', type, response: { status, body } }));
   upstream.on('upgrade', (request, socket, head) => {
@@ -93,7 +96,7 @@ test('WebSocket sends live snapshots, scopes subscriptions and keeps catalog upd
     assert.equal(request.headers.authorization, `Bearer ${token}`);
     ws.handleUpgrade(request, socket, head, client => {
       client.once('message', message => {
-        assert.deepEqual(JSON.parse(message.toString()), { id: 'online', op: 'subscribe', path: route });
+        assert.deepEqual(JSON.parse(message.toString()), { id: 'online', op: 'subscribe', path: route, updates: 'delta' });
         publish(client, 'snapshot', snapshot);
       });
     });
@@ -131,13 +134,17 @@ test('WebSocket sends live snapshots, scopes subscriptions and keeps catalog upd
   await until(() => messages.some(frame => frame.type === 'catalog' && frame.version === null), 'initial catalog frame');
   await writeFile(join(temp, 'catalog.json'), '{}');
   await until(() => messages.some(frame => frame.type === 'catalog' && frame.version), 'catalog update alongside players');
-  for (const socket of ws.clients) publish(socket, 'update', { players: [] });
+  for (const socket of ws.clients) socket.send(JSON.stringify({
+    id: 'online', type: 'patch', patch: { set: { players: [] }, remove: [] },
+  }));
   await until(() => messages.some(frame => frame.type === 'players' && frame.roster.status === 'ready' && !frame.roster.players.length), 'empty list');
   for (const socket of ws.clients) publish(socket, 'update', { players: [{ name: 'Malformed!', pingMillis: 0 }] });
   await until(() => messages.some(frame => frame.type === 'players' && frame.roster.status === 'unavailable'), 'malformed list clears state');
   assert.equal(await online.lists('live', 'Listed'), false);
   snapshot = { players: [{ name: 'Rejoined', pingMillis: 162, private: token }] };
-  for (const socket of ws.clients) socket.terminate();
+  for (const socket of ws.clients) socket.send(JSON.stringify({
+    id: 'online', type: 'patch', patch: { set: {}, remove: ['unknown-field'] },
+  }));
   await until(() => messages.some(frame => frame.type === 'players' && frame.roster.status === 'offline'), 'socket disconnect clears state');
   await until(() => messages.some(frame => frame.type === 'players' && frame.roster.status === 'ready' && frame.roster.players[0]?.name === 'Rejoined'),
     'a fresh roster after reconnect');
@@ -161,6 +168,9 @@ test('the directory survives an initial refusal, rejected subscription and a res
   const ws = new WebSocketServer({ noServer: true });
   const upstream = createServer((_request, response) => response.writeHead(405).end());
   let attempts = 0;
+  ws.on('headers', headers => {
+    if (attempts === 2) headers.push('X-WebCraft-Subscription-Updates: delta');
+  });
   let infoCommands = 0;
   let starting = true;
   const send = (client: WebSocket, id: string, type: string, status: number, body: unknown) =>
@@ -175,6 +185,7 @@ test('the directory survives an initial refusal, rejected subscription and a res
     ws.handleUpgrade(request, socket, head, client => {
       client.on('message', message => {
         const cmd = JSON.parse(message.toString());
+        assert.equal(cmd.updates, attempts === 2 ? 'delta' : undefined);
         if (cmd.id === 'server-status') {
           send(client, cmd.id, 'snapshot', 200, { status: starting ? 'starting' : 'ready' });
         } else {
@@ -203,8 +214,16 @@ test('the directory survives an initial refusal, rejected subscription and a res
   const { refreshDirectory } = attachLiveUpdates(api, directory.snapshot, new Map(), online);
   const site = await listen(api);
   const browser = new WebSocket(site.replace('http:', 'ws:') + '/api/live');
-  const frames: LiveUpdate[] = [];
-  browser.on('message', message => frames.push(JSON.parse(message.toString()) as LiveUpdate));
+  let delivered: ServerSummary[] | undefined;
+  browser.on('message', message => {
+    const frame: LiveUpdate = JSON.parse(message.toString());
+    if (frame.type === 'servers') delivered = frame.servers;
+    if (frame.type === 'servers-patch') {
+      assert.ok(delivered);
+      delivered = applyDirectoryPatch(delivered, frame);
+      assert.ok(delivered);
+    }
+  });
   const stop = directory.start(refreshDirectory);
   t.after(async () => {
     stop();
@@ -216,6 +235,8 @@ test('the directory survives an initial refusal, rejected subscription and a res
     await new Promise<void>(resolve => api.close(() => resolve()));
     database.close();
   });
+  await once(browser, 'open');
+  browser.send(JSON.stringify(directorySubscription));
   const current = async () => (await directory.snapshot())[0];
   await until(async () => (await current()).status === 'offline', 'refused TCP connection');
   upstream.listen(port, '127.0.0.1');
@@ -228,14 +249,27 @@ test('the directory survives an initial refusal, rejected subscription and a res
   starting = false;
   const fourDays = 4 * 24 * 60 * 60;
   for (const client of ws.clients) {
-    send(client, 'server-status', 'update', 200, { status: 'ready' });
+    client.send(JSON.stringify({ id: 'server-status', type: 'patch', patch: { set: { status: 'ready' }, remove: [] } }));
     send(client, 'server-info', 'update', 200, {
-      serverName: 'New world', worldAgeMinutes: 5 * 1440, worldAgeDays: 5, uptimeSeconds: 180, totalUptimeSeconds: fourDays,
+      serverName: 'New world', worldAgeMinutes: 5 * 1440, worldAgeDays: 5, motd: 'Old MOTD',
+      uptimeSeconds: 180, totalUptimeSeconds: fourDays,
     });
   }
   await until(async () => (await current()).worldAgeMinutes === 5 * 1440, 'ready projection uses precise age');
   assert.equal((await current()).totalUptimeSeconds, fourDays);
   assert.equal((await current()).uptimeSeconds, 180);
+  for (const client of ws.clients) {
+    client.send(JSON.stringify({
+      id: 'server-info', type: 'patch', patch: { set: { uptimeSeconds: 240, worldAgeDays: null }, remove: ['motd'] },
+    }));
+    client.send(JSON.stringify({
+      id: 'server-info', type: 'patch', patch: { set: { playersOnline: 3 }, remove: ['worldAgeDays'] },
+    }));
+  }
+  await until(async () => (await current()).playersOnline === 3 && (await current()).uptimeSeconds === 240
+    && (await current()).worldAgeDays === undefined,
+    'upstream applies consecutive patches including a null field and its removal');
+  assert.equal((await current()).motd, undefined);
   for (const client of ws.clients) client.terminate();
   await new Promise<void>(resolve => upstream.close(() => resolve()));
   await until(async () => (await current()).status === 'offline', 'loss of the active WebCraft connection');
@@ -259,6 +293,84 @@ test('the directory survives an initial refusal, rejected subscription and a res
   }
   await until(async () => (await current()).worldAgeDays === 1, 'legacy days update on the new socket');
   assert.equal((await current()).worldAgeMinutes, undefined);
-  await until(() => frames.some(frame => frame.type === 'servers' && frame.servers[0].name === 'Legacy feed'
-    && frame.servers[0].status === 'ready'), 'browser stayed subscribed and received the new ready state');
+  await until(() => delivered?.[0]?.name === 'Legacy feed' && delivered[0].status === 'ready',
+    'browser stayed subscribed and received the new ready state');
+});
+
+test('the browser opts in to one full directory and receives small per-instance patches afterward', async t => {
+  const icon = 'data:image/png;base64,' + 'x'.repeat(6000);
+  let servers: ServerSummary[] = [
+    { alias: 'old', status: 'ready', tabs: [], logo: icon, uptimeSeconds: 60, playersOnline: 1, lastSeenAt: 100 },
+    { alias: 'remove', status: 'waiting', tabs: [] },
+  ];
+  const api = createServer();
+  api.on('request', (_request, response) => response.end(JSON.stringify({ servers })));
+  let reads = 0;
+  const live = attachLiveUpdates(api, async () => { reads++; return servers; }, new Map(), createOnlinePlayers(new Map()));
+  const site = await listen(api);
+  const address = site.replace('http:', 'ws:') + '/api/live';
+  const active = new Set<WebSocket>();
+  t.after(async () => {
+    for (const socket of active) socket.terminate();
+    await new Promise<void>(resolve => api.close(() => resolve()));
+  });
+  async function connect() {
+    const client = new WebSocket(address, { origin: site });
+    active.add(client);
+    const frames: LiveUpdate[] = [];
+    client.on('message', message => frames.push(JSON.parse(message.toString()) as LiveUpdate));
+    await once(client, 'open');
+    return { client, frames };
+  }
+  const rejected = new WebSocket(address, { origin: 'https://unrelated.example' });
+  await once(rejected, 'error');
+  const { client, frames } = await connect();
+  live.refreshDirectory();
+  assert.equal(reads, 0);
+  client.send(JSON.stringify({ server: null }));
+  client.send(JSON.stringify(directorySubscription));
+  await until(() => frames.length === 1, 'initial browser snapshot');
+  const initial = frames[0];
+  assert.deepEqual(initial, { type: 'servers', servers });
+  client.send(JSON.stringify(directorySubscription));
+  await wait(50);
+  assert.equal(frames.length, 1);
+
+  servers = [{ ...servers[0], uptimeSeconds: 62, lastSeenAt: 123 }, servers[1]];
+  live.refreshDirectory();
+  await wait(50);
+  assert.equal(frames.length, 1);
+  assert.deepEqual(await fetch(site).then(response => response.json()), { servers });
+
+  servers = [{ ...servers[0], uptimeSeconds: 120, lastSeenAt: 158 }, servers[1]];
+  live.refreshDirectory();
+  await until(() => frames.length === 2, 'minute boundary produces a patch');
+  assert.deepEqual(frames[1], { type: 'servers-patch', added: [], removed: [], changed: [
+    { alias: 'old', set: { uptimeSeconds: 120, lastSeenAt: 158 }, remove: [] },
+  ] });
+  assert.ok(JSON.stringify(frames[1]).length < 200);
+  const minute = applyDirectoryPatch(initial.servers, frames[1])!;
+  assert.deepEqual(minute, servers);
+
+  servers = [
+    { alias: 'old', status: 'offline', tabs: [], logo: icon, lastSeenAt: 159 },
+    { alias: 'new', status: 'starting', tabs: ['items'] },
+  ];
+  live.refreshDirectory();
+  await until(() => frames.length === 3, 'status, removals and additions produce a patch');
+  assert.deepEqual(applyDirectoryPatch(minute, frames[2]), servers);
+  assert.ok(!JSON.stringify(frames[2]).includes(icon));
+  assert.equal(applyDirectoryPatch(minute, { added: [], removed: [], changed: [
+    { alias: 'old', set: { status: 'offline' }, remove: ['status'] },
+  ] }), undefined);
+  assert.equal(applyDirectoryPatch(minute, { added: [], removed: [], changed: [
+    { alias: 'old', set: { status: 'invalid' }, remove: [] },
+  ] }), undefined);
+  const closed = once(client, 'close');
+  client.close();
+  await closed;
+  const fresh = await connect();
+  fresh.client.send(JSON.stringify(directorySubscription));
+  await until(() => fresh.frames.length === 1, 'reconnect starts with a fresh baseline');
+  assert.deepEqual(fresh.frames[0], { type: 'servers', servers });
 });

@@ -1,4 +1,4 @@
-import type { ServerSummary } from './serverDirectoryTypes.ts';
+import type { DirectoryPatch, DirectorySnapshot } from './directoryUpdates.mts';
 import type { OnlinePlayersState } from './onlinePlayers.mts';
 
 export const liveUpdatesPath = '/api/live';
@@ -20,6 +20,6 @@ export type CatalogUpdate = {
 };
 
 export type PlayersUpdate = { type: 'players'; server: string; subscription: number; roster: OnlinePlayersState };
-export type LiveUpdate = { type: 'servers'; servers: ServerSummary[] } | CatalogUpdate | PlayersUpdate;
+export type LiveUpdate = DirectorySnapshot | DirectoryPatch | CatalogUpdate | PlayersUpdate;
 export type CatalogSubscription = { server: string | null };
 export type PlayersSubscription = { players: string | null; subscription: number };

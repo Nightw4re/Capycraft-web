@@ -7,10 +7,27 @@
 }
 
 .player-portrait {
+  position: relative;
   margin-inline: calc(-1 * var(--info-panel-padding));
   aspect-ratio: 560 / 192;
   overflow: hidden;
 }
+
+.player-portrait-name {
+  position: absolute;
+  inset-inline-end: var(--info-panel-padding);
+  inset-block-end: 0.25rem;
+  display: grid;
+  max-inline-size: 43%;
+  padding: 0.125rem 0.45rem;
+  border-inline-start: 2px solid var(--panel-accent);
+  background: var(--panel-background-raised);
+  color: var(--text-color);
+  font: 600 clamp(0.75rem, 2.1vw, 0.95rem) / 1.2 var(--font-heading);
+  overflow-wrap: anywhere;
+}
+
+.player-portrait-name small { color: var(--body-text-color); }
 
 .player-portrait canvas:not([hidden]),
 .player-portrait img {

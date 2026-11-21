@@ -3,6 +3,7 @@ import logo from '../../assets/capycraft-winter-logo.png';
 import { followPageLink, homePath, navigatePage, serverPath, type Page } from '../navigation';
 import { usePreferences } from '../PreferencesProvider';
 import { useServerDirectory } from '../ServerDirectoryProvider';
+import { isServerPage } from '../minecraftServers.mjs';
 import { HeaderControls } from './HeaderControls';
 import { HeaderPicker } from './HeaderPicker';
 import './scene-header.css';
@@ -19,7 +20,7 @@ export function SceneHeader({ navigationEnabled = true, onNavigateHome = () => w
   const { text } = usePreferences();
   const servers = useServerDirectory().servers.filter(server => server.access !== 'pending');
   const selectedServer = servers.find(entry => entry.alias === server);
-  const section = page === 'items' || page === 'players' ? page : undefined;
+  const section = isServerPage(page) ? page : undefined;
 
   function navigateHome(event: MouseEvent<HTMLAnchorElement>) {
     if (followPageLink(event)) onNavigateHome();

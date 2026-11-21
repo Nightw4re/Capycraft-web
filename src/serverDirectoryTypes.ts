@@ -20,6 +20,6 @@ export type ServerSummary = ServerInformation & {
   alias: string;
   tabs: readonly ServerPage[];
   status: ServerStatus;
-  access?: 'pending' | 'catalog' | 'players';
+  access?: 'pending' | 'catalog' | 'players' | 'achievements' | 'quests' | 'ponder';
   lastSeenAt?: number;
 };

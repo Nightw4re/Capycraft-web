@@ -1,9 +1,9 @@
 import type { MouseEvent } from 'react';
-import { defaultAlias, isServerAlias, type ServerPage } from './minecraftServers.mjs';
+import { defaultAlias, isServerAlias, isServerPage, serverPages, type ServerPage } from './minecraftServers.mjs';
 import { isItemId, parsePublicItemPath, publicItemPath } from './items/itemRoutes.mts';
 
 export const homePath = '/';
-const serverPagePattern = /^\/server\/([a-z0-9-]+)(?:\/(items|players))?\/?$/;
+const serverPagePattern = new RegExp(`^/server/([a-z0-9-]+)(?:/(${serverPages.join('|')}))?/?$`);
 
 export type ItemRecipeView = 'recipes' | 'uses';
 export type RecipeIngredientRoute = { recipe: string; slot: number };
@@ -118,7 +118,7 @@ export function routeFromUrl(url: string, isKnownServer?: (alias: string) => boo
   const server = publicItem?.server ?? match?.[1];
   if (!isServerAlias(server) || (isKnownServer && !isKnownServer(server))) return { page: 'notFound' };
   const section = publicItem ? params.get('from') ?? 'items' : match?.[2];
-  const page = section === 'items' || section === 'players' || section === 'home' ? section : publicItem ? 'items' : 'home';
+  const page = isServerPage(section) || section === 'home' ? section : publicItem ? 'items' : 'home';
   const catalogPage = page === 'items' ? readPageNumber(params.get('page')) : undefined;
   const catalogQuery = page === 'items' ? params.get('q')?.slice(0, 256) : undefined;
   const route = { page, server, catalogPage, catalogQuery } as const;

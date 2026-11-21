@@ -3,7 +3,7 @@ import { flushSync } from 'react-dom';
 import { pageUrl, routeFromUrl, type Page } from './navigation';
 import { animatePageArrival, animatePageDeparture } from './scene/pageMotion';
 
-const pageOrder: readonly Page[] = ['home', 'items', 'players', 'notFound'];
+const pageOrder: readonly Page[] = ['home', 'items', 'players', 'achievements', 'quests', 'ponder', 'notFound'];
 
 function readLocationUrl() {
   const location = window.location;

@@ -1,4 +1,5 @@
 import { WebSocket } from 'ws';
+import { applyObjectPatch, isRecord } from '../src/objectPatch.mts';
 
 export type FeedResult = { reachable: boolean; data?: unknown; httpStatus?: number };
 
@@ -35,18 +36,34 @@ export function subscribeWebcraftFeeds<Feed extends string>(
       delay: number;
       replyTimeout?: NodeJS.Timeout;
       retry?: NodeJS.Timeout;
+      baseline?: Record<string, unknown>;
     };
     const subscriptions = new Map<string, Subscription>(commands.map(command =>
       [command.id, { command, subscribed: false, delay: 1_000 }]));
     let initialized = false;
     let alive = true;
+    let delta = false;
+
+    function publish(id: Feed, result: FeedResult) {
+      current.set(id, result);
+      if (initialized) onResults(new Map([[id, result]]));
+      else if (current.size === commands.length) {
+        initialized = true;
+        delay = 1_000;
+        onResults(current);
+      }
+    }
 
     function subscribe(subscription: Subscription) {
       if (client.readyState !== WebSocket.OPEN) return;
-      client.send(JSON.stringify({ op: 'subscribe', ...subscription.command }));
+      client.send(JSON.stringify({ op: 'subscribe', ...subscription.command, ...(delta ? { updates: 'delta' } : {}) }));
       subscription.replyTimeout = setTimeout(() => client.terminate(), timeout).unref();
     }
 
+    client.on('upgrade', response => {
+      const updates = response.headers['x-webcraft-subscription-updates'];
+      delta = typeof updates === 'string' && updates.trim().toLowerCase() === 'delta';
+    });
     client.on('open', () => {
       for (const subscription of subscriptions.values()) subscribe(subscription);
       heartbeat = setInterval(() => {
@@ -60,10 +77,26 @@ export function subscribeWebcraftFeeds<Feed extends string>(
     });
     client.on('pong', () => { alive = true; });
     client.on('message', (message, binary) => {
-      if (stopped || binary) return;
-      let data: { id?: unknown; type?: unknown; response?: { status?: unknown; body?: unknown } } | null;
-      try { data = JSON.parse(message.toString()); } catch { return; }
+      if (stopped || binary || client.readyState !== WebSocket.OPEN) return;
+      let data: { id?: unknown; type?: unknown; response?: { status?: unknown; body?: unknown }; patch?: unknown } | null;
+      try { data = JSON.parse(message.toString()); } catch {
+        if (delta) client.terminate();
+        return;
+      }
       const subscription = typeof data?.id === 'string' ? subscriptions.get(data.id) : undefined;
+      if (data?.type === 'patch') {
+        const status = subscription && current.get(subscription.command.id)?.httpStatus;
+        const body = delta && subscription?.subscribed && subscription.baseline
+          && applyObjectPatch(subscription.baseline, data.patch);
+        if (!subscription || !status || !body) {
+          client.terminate();
+          return;
+        }
+        subscription.baseline = body;
+        publish(subscription.command.id, { reachable: true, httpStatus: status,
+          data: status >= 200 && status < 300 ? body : undefined });
+        return;
+      }
       const status = data?.response?.status;
       if (!data || !subscription || typeof status !== 'number' || !Number.isInteger(status) || status < 100 || status > 599) return;
       if (subscription.subscribed ? data.type !== 'update'
@@ -79,14 +112,9 @@ export function subscribeWebcraftFeeds<Feed extends string>(
       const result = {
         reachable: true, httpStatus: status, data: data.type !== 'response' && status >= 200 && status < 300 ? data.response?.body : undefined,
       };
-      const { id } = subscription.command;
-      current.set(id, result);
-      if (initialized) onResults(new Map([[id, result]]));
-      else if (current.size === commands.length) {
-        initialized = true;
-        delay = 1_000;
-        onResults(current);
-      }
+      subscription.baseline = delta && data.type !== 'response' && isRecord(data.response?.body)
+        ? data.response.body : undefined;
+      publish(subscription.command.id, result);
     });
     client.on('unexpected-response', (_request, response) => {
       // Like HTTP polling, an error response still means the upstream is reachable.
