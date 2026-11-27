@@ -16,3 +16,9 @@ export function animatePageArrival(panels: HTMLElement, direction = 1) {
     { duration: 220, easing: 'ease-out' },
   );
 }
+
+export function animatePanelArrival(element: HTMLElement | null | undefined, direction = 1) {
+  if (element?.animate && window.matchMedia('(prefers-reduced-motion: no-preference)').matches) {
+    return animatePageArrival(element, direction);
+  }
+}

@@ -1,0 +1,85 @@
+.minecraft-account {
+  box-sizing: border-box;
+  inline-size: min(26rem, calc(100% - 2rem));
+  max-block-size: calc(100% - 2rem);
+  padding: clamp(0.75rem, 4vw, 1.25rem);
+  border: 1px solid var(--panel-border);
+  background: var(--panel-background);
+  color: var(--body-text-color);
+  overflow-wrap: anywhere;
+}
+
+.minecraft-account::backdrop {
+  background: rgb(0 0 0 / 65%);
+}
+
+.minecraft-account header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.minecraft-account h2 {
+  margin: 0;
+  color: var(--text-color);
+}
+
+.minecraft-account .item-detail-close {
+  flex: none;
+  min-block-size: 2rem;
+}
+
+.minecraft-account form,
+.minecraft-account label,
+.minecraft-account-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.5rem;
+}
+
+.minecraft-account-picker .header-picker-trigger {
+  inline-size: 100%;
+  min-inline-size: 0;
+  justify-content: flex-start;
+}
+
+.minecraft-account-picker .header-picker-label {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.minecraft-account-picker .header-picker-arrow {
+  margin-inline-start: auto;
+}
+
+.minecraft-account-picker .header-picker-options {
+  inline-size: 100%;
+  max-block-size: min(9rem, 40dvh);
+}
+
+.minecraft-account-picker .header-picker-options button {
+  white-space: normal;
+}
+
+.minecraft-account :is(p, ul) {
+  margin-block: 0.75rem;
+}
+
+.minecraft-account :is(input, .minecraft-account-action) {
+  box-sizing: border-box;
+  min-inline-size: 0;
+  min-block-size: 2.75rem;
+  padding: 0.375em 0.75em;
+  border: 1px solid var(--panel-border);
+  border-radius: 0;
+  background: var(--button-fill);
+  color: var(--text-color);
+  font: inherit;
+  color-scheme: dark;
+}
+
+.minecraft-account .minecraft-account-action:hover:not(:disabled) {
+  background: var(--button-hover);
+}

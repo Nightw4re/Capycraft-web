@@ -3,18 +3,22 @@ import sharp from 'sharp';
 import { lookupSlot } from '../src/items/catalogIndex.mjs';
 import layout from '../src/items/catalogLayout.json' with { type: 'json' };
 import { isItemId, parsePublicItemPath, publicItemPath, publicItemPathPattern } from '../src/items/itemRoutes.mts';
+import { isPreviewIconName } from '../src/items/previewAtlas.mts';
 import { plainMinecraftText } from '../src/minecraftText.mts';
+import { isServerPage } from '../src/minecraftServers.mjs';
+import { legacyQuestsLocation, pageMetadata, pageTitle, playersPath, profileName, serverPagePath, serverPagePattern, siteName } from '../src/pageMetadata.mts';
 
 const sitemapPath = '/sitemap.xml';
 const robotsPath = '/robots.txt';
 const sitemapPartPath = '/sitemap-items-([a-z0-9-]+)-([1-9][0-9]*)\\.xml';
 const sitemapPartPattern = new RegExp(`^${sitemapPartPath}$`);
+const sitePagePath = `(?:/|/404/?|${playersPath}/?|${serverPagePath})`;
+const sitePagePattern = new RegExp(`^${sitePagePath}$`);
 export const itemPageProxyPattern =
-  `^(?:${publicItemPathPattern}(?:/icon\\.png)?|${sitemapPartPath}|/sitemap\\.xml|/robots\\.txt)(?:\\?|$)`;
+  `^(?:${sitePagePath}|${publicItemPathPattern}(?:/icon\\.png)?|${sitemapPartPath}|/sitemap\\.xml|/robots\\.txt)(?:\\?|$)`;
 const itemPagePattern = new RegExp(itemPageProxyPattern);
 const sitemapPageSize = 25_000;
 const resourceHash = /^[a-f0-9]{64}$/;
-const imageName = /^[a-f0-9]{64}\.(png|webp)$/;
 const xmlDeclaration = '<?xml version="1.0" encoding="UTF-8"?>';
 const sitemapNamespace = 'xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"';
 
@@ -74,7 +78,7 @@ async function findItem({ manifest, read }: Catalog, id: string) {
 function getIconName(item: Item, version: number) {
   if (!item.icon) return;
   if (version === 1 && resourceHash.test(item.icon)) return `${item.icon}.png`;
-  if (version !== 1 && imageName.test(item.icon)) return item.icon;
+  if (version !== 1 && isPreviewIconName(item.icon)) return item.icon;
 }
 
 function requestOrigin(request: IncomingMessage) {
@@ -85,35 +89,38 @@ function requestOrigin(request: IncomingMessage) {
   if (URL.canParse(origin)) return new URL(origin).origin;
 }
 
-function renderItemPage(shell: string, origin: string, server: string, item: Item, icon?: string) {
-  const name = escapeMarkup(plainMinecraftText(item.name).trim() || item.id);
-  const description = `Explore recipes and uses for ${name} in the ${server} Minecraft item catalog.`;
-  const url = escapeMarkup(origin + publicItemPath(server, item.id));
-  const image = icon ? `${url}/icon.png?v=${icon.split('.')[0]}` : `${origin}/favicon.png`;
-  const size = icon ? 256 : 512;
-  const head = `<title>${name} | Capycraft</title>
-  <meta name="description" content="${description}">
-  <link rel="canonical" href="${url}">
+function renderPage(shell: string, name: string, description: string, url: string, image: string, size: number) {
+  const head = `<title>${escapeMarkup(pageTitle(name))}</title>
+  <meta name="description" content="${escapeMarkup(description)}">
+  <link rel="canonical" href="${escapeMarkup(url)}">
   <meta property="og:type" content="website">
-  <meta property="og:site_name" content="Capycraft">
-  <meta property="og:title" content="${name}">
-  <meta property="og:description" content="${description}">
-  <meta property="og:url" content="${url}">
-  <meta property="og:image" content="${image}">
+  <meta property="og:site_name" content="${siteName}">
+  <meta property="og:title" content="${escapeMarkup(name)}">
+  <meta property="og:description" content="${escapeMarkup(description)}">
+  <meta property="og:url" content="${escapeMarkup(url)}">
+  <meta property="og:image" content="${escapeMarkup(image)}">
   <meta property="og:image:type" content="image/png">
   <meta property="og:image:width" content="${size}">
-  <meta property="og:image:height" content="${size}">
-  <noscript><style>#root > .scene-loader { display: none; }</style></noscript>`;
+  <meta property="og:image:height" content="${size}">`;
+  return shell.replace('<title>Capycraft</title>', () => head);
+}
+
+function renderItemPage(shell: string, origin: string, server: string, item: Item, icon?: string) {
+  const name = plainMinecraftText(item.name).trim() || item.id;
+  const description = `Explore recipes and uses for ${name} in the ${server} Minecraft item catalog.`;
+  const url = origin + publicItemPath(server, item.id);
+  const image = icon ? `${url}/icon.png?v=${icon.split('.')[0]}` : `${origin}/favicon.png`;
   const summary = `<noscript>
       <main style="padding:1.5rem;color:#f5f0ff;font:1rem system-ui,sans-serif">
-        <img src="${image}" width="96" height="96" alt="" style="image-rendering:pixelated">
-        <h1>${name}</h1>
-        <p>${description}</p>
+        <img src="${escapeMarkup(image)}" width="96" height="96" alt="" style="image-rendering:pixelated">
+        <h1>${escapeMarkup(name)}</h1>
+        <p>${escapeMarkup(description)}</p>
         <p><code>${escapeMarkup(item.id)}</code></p>
         <a href="/server/${server}/items" style="color:inherit">Browse the item catalog</a>
       </main>
     </noscript>`;
-  return shell.replace('<title>Capycraft</title>', () => head)
+  return renderPage(shell, name, description, url, image, icon ? 256 : 512)
+    .replace('</head>', '<noscript><style>#root > .scene-loader { display: none; }</style></noscript></head>')
     .replace('<div id="root">', root => `${root}\n    ${summary}`);
 }
 
@@ -172,6 +179,23 @@ export function createItemPages(aliases: Iterable<string>, readAsset: ReadAsset,
     const origin = requestOrigin(request);
     if (!origin) return send(request, response, 400, text, 'Invalid host.');
     try {
+      if (sitePagePattern.test(path)) {
+        const [, server, section] = serverPagePattern.exec(path) ?? [];
+        const params = new URL(request.url ?? path, origin).searchParams;
+        if (server && section === 'quests') {
+          response.writeHead(308, { Location: legacyQuestsLocation(server, params) }).end();
+          return;
+        }
+        const canonicalPath = path === '/' ? path : path.replace(/\/$/, '');
+        const page = canonicalPath === playersPath ? 'players'
+          : isServerPage(section) ? section : server || path === '/' ? 'home' : 'notFound';
+        const player = server && profileName(page, params);
+        const { name, description } = pageMetadata(page, server, player);
+        const query = player ? `?${new URLSearchParams({ player })}` : '';
+        const html = renderPage(await loadShell(), name, description, origin + canonicalPath + query,
+          `${origin}/favicon.png`, 512);
+        return send(request, response, page === 'notFound' ? 404 : 200, 'text/html; charset=utf-8', html);
+      }
       if (path === robotsPath) return send(request, response, 200, text, `Sitemap: ${origin}${sitemapPath}\n`);
       if (path === sitemapPath) {
         const parts = [];
@@ -223,7 +247,8 @@ export function createItemPages(aliases: Iterable<string>, readAsset: ReadAsset,
       const html = renderItemPage(await loadShell(), origin, route.server, item, icon);
       return send(request, response, 200, 'text/html; charset=utf-8', html);
     } catch {
-      return send(request, response, 503, text, 'Item catalog temporarily unavailable.');
+      return send(request, response, 503, text, sitePagePattern.test(path)
+        ? 'Page temporarily unavailable.' : 'Item catalog temporarily unavailable.');
     }
   }
 

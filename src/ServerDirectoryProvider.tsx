@@ -20,7 +20,9 @@ function markDirectoryUnavailable(servers: readonly ServerSummary[] | undefined)
       status: server.status === 'ready' || server.status === 'starting' || server.status === 'stopping'
         ? 'unavailable' : server.status,
       playersOnline: undefined,
+      lastKnownPlayersOnline: server.playersOnline ?? server.lastKnownPlayersOnline,
       uptimeSeconds: undefined,
+      performance: undefined,
     })),
   };
 }
@@ -178,9 +180,9 @@ export function useServerDirectory() {
   return { servers: servers ?? emptyServers, loaded: servers !== undefined, unavailable };
 }
 
-export function useLiveCatalog(server: string) {
+export function useLiveCatalog(server?: string) {
   const subscribe = useContext(subscriptionContext);
   const catalog = useContext(catalogContext);
-  useEffect(() => subscribe(server), [server, subscribe]);
+  useEffect(() => server ? subscribe(server) : undefined, [server, subscribe]);
   return catalog?.server === server ? catalog : undefined;
 }

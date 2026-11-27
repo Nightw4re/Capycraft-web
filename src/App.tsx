@@ -1,24 +1,26 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import discordLogo from '../assets/discord-symbol-white.svg';
+import { CatalogImportNotice } from './items/CatalogImportNotice';
 import { CatalogLanguageNotice } from './items/CatalogLanguageNotice';
 import { ServerItems } from './items/ItemCatalog';
 import { HomeHighlight } from './layout/HomeHighlight';
+import { HomeLeaderboard } from './layout/HomeLeaderboard';
 import { InfoPanel } from './layout/InfoPanel';
 import { PageError } from './layout/PageError';
 import { PageLayout } from './layout/PageLayout';
 import { ServerOverview } from './layout/ServerOverview';
 import { isServerAlias } from './minecraftServers.mjs';
 import { catalogPageUrl, itemUrl, pageUrl, routeFromUrl, serverPath,
-  type ItemRecipeView, type RecipeIngredientRoute } from './navigation';
-import { PlayerList } from './players/PlayerList';
-import { AchievementsPage } from './players/AchievementsPage';
-import { QuestsPage } from './players/QuestsPage';
-import { PonderPage } from './ponder/PonderPage';
+  type ItemRecipeView, type PlayerProfileTab, type RecipeIngredientRoute } from './navigation';
+import { PlayerList, PlayerServerSelection } from './players/PlayerList';
+import { PlayerProfile } from './players/PlayerProfile';
+import { ItemPonderLinks } from './ponder/ItemPonderLinks';
 import { usePreferences } from './PreferencesProvider';
-import { useServerDirectory } from './ServerDirectoryProvider';
+import { useLiveCatalog, useServerDirectory } from './ServerDirectoryProvider';
 import { NugwaPortrait } from './portrait/NugwaPortrait';
 import { WinterScene } from './scene/WinterScene';
 import { usePageLocation } from './usePageLocation';
+import { pageMetadata, pageTitle, profileName } from './pageMetadata.mts';
 
 const serverSelectionKey = 'capycraft.selectedServer';
 
@@ -40,7 +42,7 @@ function storeServerSelection(server?: string) {
   }
 }
 
-export function App() {
+export function App({ animate = true }: { animate?: boolean }) {
   const { text } = usePreferences();
   const { servers, loaded } = useServerDirectory();
   const isKnownServer = (alias: string) => !loaded || servers.some(server => server.alias === alias);
@@ -50,7 +52,56 @@ export function App() {
   const route = routeFromUrl(url, isKnownServer);
   const { page } = route;
   const routeServer = 'server' in route ? route.server : undefined;
+  const activeServer = routeServer ?? rememberedServer;
+  const catalogUpdate = useLiveCatalog(page === 'notFound' ? undefined : activeServer);
+  const playersServer = servers.find(server => server.alias === activeServer && server.tabs.includes('players'))
+    ?? servers.find(server => server.tabs.includes('players'));
+  const params = new URL(url, window.location.origin).searchParams;
+  const playerName = routeServer && profileName(page, params);
+  const requestedTab = page === 'players' ? params.get('tab') : 'achievements';
+  const serverTabs = servers.find(server => server.alias === routeServer)?.tabs;
+  const profileTabs: PlayerProfileTab[] = ['inventory'];
+  if (serverTabs?.includes('achievements')) profileTabs.push('achievements');
+  if (serverTabs?.includes('quests')) profileTabs.push('quests');
+  const profileTab = profileTabs.find(tab => tab === requestedTab) ?? profileTabs[0];
+  const profile: { name: string; tab: PlayerProfileTab } | undefined =
+    playerName ? { name: playerName, tab: serverTabs ? profileTab
+      : requestedTab === 'achievements' || requestedTab === 'quests' ? requestedTab : 'inventory' } : undefined;
+  const previousProfile = useRef({ server: routeServer, name: playerName });
+  useLayoutEffect(() => {
+    const previous = previousProfile.current;
+    previousProfile.current = { server: routeServer, name: playerName };
+    const container = panels.current;
+    if (!container || (playerName === previous.name && routeServer === previous.server)) return;
+
+    const heading = container.querySelector<HTMLElement>('h1[tabindex="-1"]');
+    if (playerName) {
+      heading?.focus({ preventScroll: true });
+      return;
+    }
+    if (page !== 'players' || !previous.name || previous.server !== routeServer) return;
+
+    const player = previous.name.toLowerCase();
+    const selector = `.online-players-grid a[data-player="${CSS.escape(player)}"]`;
+    heading?.focus({ preventScroll: true });
+    const restorePlayerFocus = () => {
+      if (document.activeElement !== heading && document.activeElement !== document.body) return true;
+      const link = container.querySelector<HTMLAnchorElement>(selector);
+      link?.focus();
+      return !!link;
+    };
+    if (restorePlayerFocus()) return;
+    const observer = new MutationObserver(() => {
+      if (restorePlayerFocus()) observer.disconnect();
+    });
+    observer.observe(container, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [page, playerName, routeServer]);
   const item = 'item' in route ? route.item : undefined;
+  const title = pageTitle(item?.id ?? pageMetadata(page, routeServer, playerName).name);
+  useLayoutEffect(() => {
+    document.title = title;
+  }, [title]);
   const catalogPage = 'catalogPage' in route ? route.catalogPage ?? 0 : 0;
   const catalogQuery = 'catalogQuery' in route ? route.catalogQuery ?? '' : '';
 
@@ -95,6 +146,8 @@ export function App() {
     setUrl(next);
   }
 
+  const questItems = { itemHref, itemOpen: !!item, onOpenItem: openItem };
+
   function closeItem() {
     const state = window.history.state;
     if (state?.recipeBack && (state.catalogPageAtOpen ?? 0) === catalogPage && (state.catalogQueryAtOpen ?? '') === catalogQuery) {
@@ -137,37 +190,51 @@ export function App() {
     }
   }
 
-  return (
-    <WinterScene page={page} server={page === 'notFound' ? undefined : routeServer ?? rememberedServer}
-      onClearServer={clearServer} panelsRef={panels}>
+  return <WinterScene animate={animate} page={page} server={page === 'notFound' ? undefined : routeServer ?? rememberedServer}
+    onClearServer={clearServer} panelsRef={panels} playerProfile={profile}>
+    <ItemPonderLinks server={page === 'notFound' ? undefined : activeServer} catalogVersion={catalogUpdate?.version ?? undefined}
+      importRevision={catalogUpdate?.status?.state === 'succeeded' ? catalogUpdate.status.revision : undefined} location={url}>
+      {page !== 'items' && activeServer && page !== 'notFound' &&
+        <CatalogImportNotice status={catalogUpdate?.status} updating={!!catalogUpdate?.version} />}
       {page === 'notFound' && <PageError code={404} />}
-      {route.page === 'players' && <PlayerList key={route.server} server={route.server} />}
-      {route.page === 'achievements' && <AchievementsPage key={route.server} server={route.server} />}
-      {route.page === 'quests' && <QuestsPage key={route.server} server={route.server} />}
-      {route.page === 'ponder' && <PonderPage key={route.server} server={route.server} />}
+      {page === 'players' && !routeServer && <PlayerServerSelection />}
+      {(route.page === 'players' || route.page === 'achievements') && route.server && (profile
+        ? <PlayerProfile key={`${route.server}/${profile.name.toLowerCase()}`} server={route.server} {...profile}
+          tabs={profileTabs}
+          progressUrl={url} questItems={questItems} itemHref={itemHref} onOpenItem={openItem} />
+        : <PlayerList key={route.server} server={route.server} />)}
       <CatalogLanguageNotice active={page === 'items'} />
-      {routeServer && (page === 'items' || item) && <ServerItems key={routeServer} server={routeServer}
+      {routeServer && (page === 'items' || item) && <ServerItems key={routeServer} server={routeServer} catalogUpdate={catalogUpdate}
         showCatalog={page === 'items'} page={catalogPage} query={catalogQuery} onPageChange={changeCatalogPage}
-        item={item} itemHref={itemHref} onOpenItem={openItem} onCloseItem={closeItem}
+        item={item} itemHref={itemHref} onCloseItem={closeItem} onOpenItem={openItem}
         onRecipePositionChange={changeRecipePosition} onOpenIngredient={openIngredient} onCloseIngredient={closeIngredient} />}
-      {page === 'home' && <PageLayout header={<HomeHighlight />} layout="grid">
-        <InfoPanel title={text.about}>
-          <p className="info-panel-note">{text.officialMinecraftAccount}</p>
-          <p>{text.server}</p>
-          <p>{text.communityLanguage}</p>
-          <a className="discord-invite" href="https://discord.gg/qsggTTjKE8" target="_blank" rel="noopener noreferrer">
-            <img src={discordLogo} width={36} height={27} alt="" loading="lazy" />
-            {text.discordInvite}
-          </a>
-        </InfoPanel>
-        <InfoPanel title={text.dashboard}>
-          <div className="player-dashboard-preview">
-            <p>{text.dashboardSoon}</p>
-            <NugwaPortrait server={routeServer ?? rememberedServer} />
+      {page === 'home' && <PageLayout layout="home">
+        <div className="home-main">
+          <ServerOverview activeServer={activeServer} compact />
+          <HomeHighlight />
+          <div className="page-layout-content" data-layout="grid">
+            <InfoPanel title={text.about}>
+              <p className="info-panel-note">{text.officialMinecraftAccount}</p>
+              <p>{text.server}</p>
+              <p>{text.communityLanguage}</p>
+              <a className="discord-invite" href="https://discord.gg/qsggTTjKE8" target="_blank" rel="noopener noreferrer">
+                <img src={discordLogo} width={36} height={27} alt="" loading="lazy" />
+                {text.discordInvite}
+              </a>
+            </InfoPanel>
+            <div className="home-dashboard">
+              <InfoPanel title={text.dashboard}>
+                <div className="player-dashboard-preview">
+                  <p>{text.dashboardSoon}</p>
+                  <NugwaPortrait server={activeServer} profileServer={playersServer?.alias} />
+                </div>
+              </InfoPanel>
+              <HomeLeaderboard />
+            </div>
           </div>
-        </InfoPanel>
-        <ServerOverview />
+        </div>
+        <ServerOverview activeServer={activeServer} />
       </PageLayout>}
-    </WinterScene>
-  );
+    </ItemPonderLinks>
+  </WinterScene>;
 }

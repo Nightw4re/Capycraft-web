@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { WebSocket, WebSocketServer } from 'ws';
 import layout from '../src/items/catalogLayout.json' with { type: 'json' };
 import { directorySubscription } from '../src/directoryUpdates.mts';
-import { liveUpdatesPath, type ImportStatus, type LiveUpdate } from '../src/liveUpdates.mts';
+import { catalogImportStages, liveUpdatesPath, readCatalogImportDurations, type ImportStatus, type LiveUpdate } from '../src/liveUpdates.mts';
 import type { ServerSummary } from '../src/serverDirectoryTypes.ts';
 import type { createOnlinePlayers } from './onlinePlayers.mts';
 import { directoryMessage } from './directoryUpdates.mts';
@@ -72,12 +72,28 @@ function readStatus(text: string | undefined): ImportStatus | null {
   if (typeof data?.revision !== 'string' || !/^[a-f0-9]{64}$/.test(data.revision)
     || typeof data.updatedAt !== 'number' || !Number.isSafeInteger(data.updatedAt)
     || (data.state !== 'running' && data.state !== 'succeeded' && data.state !== 'failed')) return null;
-  const { state, revision, updatedAt, phase, progress } = data;
+  const { state, revision, updatedAt, phase, stage, stagePlan, stageElapsedMs, lastStageDurations, progress, recipeIndexProgress } = data;
   const status: ImportStatus = { state, revision, updatedAt };
   if (phase === 'preparing' || phase === 'processing' || phase === 'publishing') status.phase = phase;
+  if (state === 'running' && stage && (stage === 'publishing-ponder' || catalogImportStages.includes(stage))) {
+    status.stage = stage;
+    if (stage !== 'publishing-ponder' && Array.isArray(stagePlan) && stagePlan.includes(stage)) {
+      status.stagePlan = catalogImportStages.filter(candidate => stagePlan.includes(candidate));
+    }
+    if (typeof stageElapsedMs === 'number' && Number.isSafeInteger(stageElapsedMs) && stageElapsedMs >= 0) {
+      status.stageElapsedMs = stageElapsedMs;
+      status.lastStageDurations = readCatalogImportDurations(lastStageDurations);
+    }
+  }
   if (progress && Number.isSafeInteger(progress.loaded) && Number.isSafeInteger(progress.expected)
     && progress.loaded >= 0 && progress.expected >= progress.loaded) {
     status.progress = { loaded: progress.loaded, expected: progress.expected };
+  }
+  if (state === 'running' && phase === 'processing' && recipeIndexProgress
+    && Number.isSafeInteger(recipeIndexProgress.indexed) && Number.isSafeInteger(recipeIndexProgress.total)
+    && recipeIndexProgress.indexed >= 0 && recipeIndexProgress.total > 0
+    && recipeIndexProgress.indexed <= recipeIndexProgress.total) {
+    status.recipeIndexProgress = { indexed: recipeIndexProgress.indexed, total: recipeIndexProgress.total };
   }
   return status;
 }

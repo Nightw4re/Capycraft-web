@@ -1,11 +1,13 @@
-import type { DirectoryPatch } from '../src/directoryUpdates.mts';
+import { worldGameTimeTenthsOfDay, type DirectoryPatch } from '../src/directoryUpdates.mts';
 import type { ServerSummary } from '../src/serverDirectoryTypes.ts';
 
 function changedField(key: keyof ServerSummary, before: unknown, after: unknown) {
   if (before === after) return false;
-  if (typeof before === 'number' && typeof after === 'number'
-    && (key === 'uptimeSeconds' || key === 'totalUptimeSeconds')) {
-    return Math.floor(before / 60) !== Math.floor(after / 60);
+  if (typeof before === 'number' && typeof after === 'number') {
+    if (key === 'uptimeSeconds' || key === 'totalUptimeSeconds') {
+      return Math.floor(before / 60) !== Math.floor(after / 60);
+    }
+    if (key === 'worldGameTimeTicks') return worldGameTimeTenthsOfDay(before) !== worldGameTimeTenthsOfDay(after);
   }
   return typeof before !== 'object' || typeof after !== 'object' || JSON.stringify(before) !== JSON.stringify(after);
 }

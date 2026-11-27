@@ -4,7 +4,7 @@ import './page-layout.css';
 type PageLayoutProps = {
   title?: string;
   header?: ReactNode;
-  layout?: 'stack' | 'grid';
+  layout?: 'stack' | 'grid' | 'home';
   children: ReactNode;
 };
 

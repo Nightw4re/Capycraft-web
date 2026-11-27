@@ -1,0 +1,81 @@
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: #121331;
+  color: var(--text-color);
+  color-scheme: dark;
+  font: 1rem/1.5 var(--font-body);
+}
+
+#fallback-root .scene-content {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  padding: 1rem;
+  place-items: safe center;
+}
+
+#fallback-root .scene-panels {
+  width: min(100%, 36rem);
+  padding: 0;
+  z-index: auto;
+}
+
+.fallback-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+  align-items: center;
+  gap: clamp(0.75rem, 3vw, 1.75rem);
+  padding: clamp(0.875rem, 4vw, 2rem);
+  border: 1px solid var(--panel-border);
+  background: var(--panel-background);
+  box-shadow: 0 0.5rem 1.5rem rgb(12 9 23 / 45%);
+}
+
+.fallback-panel img { display: block; width: 100%; height: auto; }
+.fallback-panel h1 { margin: 0; font-size: clamp(1.25rem, 4.5vw, 2rem); line-height: 1.2; }
+.fallback-panel p, #mine-maze p { margin: 0.5rem 0 1rem; color: var(--body-text-color); }
+.fallback-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+
+.fallback-actions button {
+  min-height: 2.75rem;
+  padding: 0.5rem 1.25rem;
+  border: 1px solid var(--button-border);
+  border-radius: 0;
+  background: var(--button-fill);
+  color: var(--text-color);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.fallback-actions button:hover { background: var(--button-hover); }
+.fallback-actions button:focus-visible { outline: 2px solid var(--text-color); outline-offset: 3px; }
+#play-maze { background: var(--panel-background-raised); }
+#play-maze:hover { background: var(--button-hover); }
+
+#mine-maze {
+  width: min(calc(100% - 1rem), 30rem);
+  max-height: calc(100% - 1rem);
+  padding: clamp(0.75rem, 3vw, 1.25rem);
+  border: 1px solid var(--panel-border);
+  background: var(--panel-background);
+  color: inherit;
+}
+
+#mine-maze::backdrop { background: rgb(12 9 23 / 78%); }
+#mine-maze h2 { margin: 0; }
+
+#maze-board {
+  display: block;
+  width: min(100%, 55svh);
+  height: auto;
+  margin: 0.75rem auto;
+  image-rendering: pixelated;
+  touch-action: none;
+}
+
+@media (max-width: 25rem) {
+  .fallback-panel { grid-template-columns: 1fr; }
+  .fallback-panel img { width: min(8rem, 42%); justify-self: center; }
+}

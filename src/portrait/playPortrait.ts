@@ -1,6 +1,7 @@
 import { createPortraitAnimation, createPortraitTransition, distinctPlayerNames, type PortraitArrival } from './portraitAnimation';
 import { portraitCast } from './portraitCast';
 import { createPortraitRenderer } from './renderPortrait';
+import { createWebGLPortraitRenderer } from './renderPortraitWebGL';
 import type { PortraitSkin } from './skinGeometry';
 import { stageWidth, type Actor, type PortraitFrame, type TimedFrame } from './portraitScene';
 
@@ -23,9 +24,45 @@ function nameHash(name: string) {
   return hash >>> 0;
 }
 
+export async function loadPortraitSkin(name: string, signal: AbortSignal, profile = false): Promise<PortraitSkin> {
+  const texture = document.createElement('canvas');
+  texture.width = texture.height = 64;
+  const textureContext = texture.getContext('2d');
+  if (!textureContext) throw new Error('Canvas is unavailable');
+
+  const bundled = portraitCast.find(player => player.name.toLowerCase() === name.toLowerCase());
+  let source = bundled?.skin.href;
+  let model = bundled?.model;
+  let objectUrl: string | undefined;
+  if (!source) {
+    const params = new URLSearchParams({ skin: name });
+    if (profile) params.set('profile', '1');
+    const response = await fetch(`/api/players?${params}`, {
+      signal: AbortSignal.any([signal, AbortSignal.timeout(6_000)]),
+    });
+    if (!response.ok) throw new Error(`Skin unavailable for ${name}`);
+    model = response.headers.get('X-Minecraft-Skin-Model') === 'slim' ? 'slim' : 'classic';
+    objectUrl = URL.createObjectURL(await response.blob());
+    source = objectUrl;
+  }
+  try {
+    const skin = new Image();
+    skin.src = source;
+    await skin.decode();
+    const legacy = skin.naturalHeight === 32;
+    if (skin.naturalWidth !== 64 || (!legacy && skin.naturalHeight !== 64)) throw new Error(`Invalid Java skin for ${name}`);
+    textureContext.clearRect(0, 0, 64, 64);
+    textureContext.drawImage(skin, 0, 0);
+    return { pixels: textureContext.getImageData(0, 0, 64, 64).data, model: legacy ? 'legacy' : model ?? 'classic' };
+  } finally {
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+  }
+}
+
 export async function playPortrait(
   stage: HTMLElement,
   canvas: HTMLCanvasElement,
+  webGLCanvas: HTMLCanvasElement,
   players: readonly string[],
   arrival: PortraitArrival | undefined,
   signal: AbortSignal,
@@ -33,42 +70,11 @@ export async function playPortrait(
   onActor: (name: string, fallback: boolean) => void,
   rotateRoster = false,
 ) {
-  const context = canvas.getContext('2d');
-  if (!context || context.isContextLost?.()) throw new Error('Canvas is unavailable');
-
+  const loadSkin = (name: string) => loadPortraitSkin(name, signal);
   const texture = document.createElement('canvas');
   texture.width = texture.height = 64;
   const textureContext = texture.getContext('2d');
   if (!textureContext) throw new Error('Canvas is unavailable');
-
-  const loadSkin = async (name: string): Promise<PortraitSkin> => {
-    const bundled = portraitCast.find(player => player.name.toLowerCase() === name.toLowerCase());
-    let source = bundled?.skin.href;
-    let model = bundled?.model;
-    let objectUrl: string | undefined;
-    if (!source) {
-      const response = await fetch(`/api/players?${new URLSearchParams({ skin: name })}`, {
-        signal: AbortSignal.any([signal, AbortSignal.timeout(6_000)]),
-      });
-      if (!response.ok) throw new Error(`Skin unavailable for ${name}`);
-      model = response.headers.get('X-Minecraft-Skin-Model') === 'slim' ? 'slim' : 'classic';
-      objectUrl = URL.createObjectURL(await response.blob());
-      source = objectUrl;
-    }
-    try {
-      const skin = new Image();
-      skin.src = source;
-      await skin.decode();
-      const legacy = skin.naturalHeight === 32;
-      if (skin.naturalWidth !== 64 || (!legacy && skin.naturalHeight !== 64)) throw new Error(`Invalid Java skin for ${name}`);
-      textureContext.clearRect(0, 0, 64, 64);
-      textureContext.drawImage(skin, 0, 0);
-      return { pixels: textureContext.getImageData(0, 0, 64, 64).data, model: legacy ? 'legacy' : model ?? 'classic' };
-    } finally {
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    }
-  };
-
   const names = distinctPlayerNames(players);
   const rolling = rotateRoster && names.length > 0;
   const active = new Map<string, PortraitSkin>();
@@ -139,13 +145,65 @@ export async function playPortrait(
   }
 
   const seatedFrame = timeline![0].frame;
-  const render = createPortraitRenderer(active);
-  const raster = context.createImageData(canvas.width, canvas.height);
+  const options = new URLSearchParams(window.location.search);
+  const measure = options.has('portraitPerf');
+  let samples: number[] = [];
+  let webGL: ReturnType<typeof createWebGLPortraitRenderer> | undefined;
+  if (options.get('portraitRenderer') !== '2d') {
+    try {
+      webGL = createWebGLPortraitRenderer(webGLCanvas, active);
+    } catch {
+      // The paired 2D canvas is available even after WebGL acquired its own context.
+    }
+  }
+  signal.addEventListener('abort', () => webGL?.dispose(), { once: true });
+  let render2D: ((frame: PortraitFrame) => void) | undefined;
+  function draw2D(frame: PortraitFrame) {
+    if (!render2D) {
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Canvas 2D is unavailable');
+      const render = createPortraitRenderer(active);
+      const raster = context.createImageData(canvas.width, canvas.height);
+      render2D = next => {
+        if (context.isContextLost?.()) throw new Error('Canvas 2D context was lost');
+        render(next, raster);
+        context.putImageData(raster, 0, 0);
+      };
+    }
+    render2D(frame);
+  }
+
+  function switchTo2D() {
+    webGL?.dispose();
+    webGL = undefined;
+    samples = [];
+  }
+
   let announced: string | undefined;
   const draw = (frame: typeof seatedFrame) => {
-    if (context.isContextLost?.()) throw new Error('Canvas context was lost');
-    render(frame, raster);
-    context.putImageData(raster, 0, 0);
+    let started = measure ? performance.now() : 0;
+    if (webGL) {
+      try {
+        webGL.render(frame);
+      } catch {
+        switchTo2D();
+        if (measure) started = performance.now();
+      }
+    }
+    if (!webGL) draw2D(frame);
+    canvas.hidden = !!webGL;
+    webGLCanvas.hidden = !webGL;
+    if (measure) {
+      samples.push(performance.now() - started);
+      if (samples.length === 120) {
+        samples.sort((a, b) => a - b);
+        console.info(`Portrait ${webGL ? 'WebGL2' : 'Canvas 2D'} CPU draw time (ms)`, {
+          median: (samples[59] + samples[60]) / 2,
+          p95: samples[113],
+        });
+        samples = [];
+      }
+    }
     const actor = frame.actors.reduce<Actor | undefined>((seen, next) =>
       next.x > -24 && next.x < stageWidth + 24 ? next : seen, undefined);
     if (actor && actor.player !== announced) {
@@ -224,7 +282,17 @@ export async function playPortrait(
   }, { once: true });
 
   observer?.observe(stage);
-  canvas.addEventListener('contextlost', onError, { signal });
+  canvas.addEventListener('contextlost', () => { if (!webGL) onError(); }, { signal });
+  webGLCanvas.addEventListener('webglcontextlost', event => {
+    event.preventDefault();
+    if (!webGL) return;
+    switchTo2D();
+    try {
+      draw(painted);
+    } catch {
+      onError();
+    }
+  }, { signal });
   document.addEventListener('visibilitychange', syncVisibility, { signal });
   window.addEventListener('blur', () => { focused = false; syncVisibility(); }, { signal });
   window.addEventListener('focus', () => { focused = true; syncVisibility(); }, { signal });

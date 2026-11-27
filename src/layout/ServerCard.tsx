@@ -1,10 +1,13 @@
-import { Fragment, useId, useLayoutEffect, useRef, useState } from 'react';
+import { Fragment, useId, type ReactNode } from 'react';
 import copyIcon from '../../assets/pixel-copy-papers.png';
 import { useNotifications } from '../notifications/Notifications';
 import { usePreferences } from '../PreferencesProvider';
 import type { Language } from '../preferences';
-import type { ServerStatus } from '../serverDirectoryTypes';
+import type { ServerPerformance, ServerStatus } from '../serverDirectoryTypes';
+import { worldGameTimeTenthsOfDay } from '../directoryUpdates.mts';
 import { parseMinecraftMotd } from './minecraftMotd';
+import { followPageLink } from '../navigation';
+import { StatusDot } from './StatusDot';
 import './server-card.css';
 
 export type MinecraftServer = {
@@ -13,11 +16,11 @@ export type MinecraftServer = {
   logo?: string;
   motd?: string;
   address?: string;
-  players?: { current?: number; max?: number };
+  players?: { current?: number; lastKnown?: number; max?: number };
   uptimeMinutes?: number;
   totalUptimeMinutes?: number;
-  worldAgeDays?: number;
-  worldAgeMinutes?: number;
+  worldGameTimeTicks?: number;
+  performance?: ServerPerformance;
   status?: ServerStatus;
   lastSeenAt?: number;
   modpack?: string;
@@ -25,57 +28,46 @@ export type MinecraftServer = {
 
 const unavailableStat = '—';
 
-function formatDuration(value: number, language: Language, precision: 'minute' | 'day' = 'minute') {
+const tickPerformanceHelp = {
+  cs: 'MSPT je průměrný čas zpracování jednoho ticku. Hodnota p95 říká, že 95 % měřených ticků trvalo nejvýš tolik. Pro běžných 20 TPS má server 50 ms na každý tick.',
+  en: 'MSPT is the average processing time per tick. The p95 is the time that 95% of sampled ticks took at most. At the standard 20 TPS, the server has 50 ms per tick.',
+  de: 'MSPT ist die durchschnittliche Verarbeitungszeit pro Tick. 95 % der gemessenen Ticks dauerten höchstens so lange wie der p95-Wert. Bei 20 TPS stehen pro Tick 50 ms zur Verfügung.',
+  es: 'MSPT es el tiempo medio de procesamiento por tick. El 95 % de los ticks medidos tardó como máximo el valor p95. A 20 TPS hay 50 ms disponibles por tick.',
+  fr: 'Le MSPT mesure le temps de traitement moyen par tick. 95 % des ticks mesurés ont duré au plus la valeur p95. À 20 TPS, le serveur dispose de 50 ms par tick.',
+  ja: 'MSPT は 1 ティックあたりの平均処理時間です。測定したティックの 95% は p95 の値以下でした。通常の 20 TPS では、1 ティックに使える時間は 50 ms です。',
+  uk: 'MSPT — середній час обробки одного тіку. Тривалість 95 % виміряних тіків не перевищувала значення p95. За стандартних 20 TPS на один тік припадає 50 мс.',
+} satisfies Record<Language, string>;
+
+function formatDuration(value: number, language: Language) {
   const format = (amount: number, unit: 'day' | 'hour' | 'minute') =>
     new Intl.NumberFormat(language, { style: 'unit', unit, unitDisplay: 'narrow' }).format(amount);
-  if (precision === 'day') return format(value, 'day');
   return value < 1440
     ? `${format(Math.floor(value / 60), 'hour')} ${format(value % 60, 'minute')}`
     : `${format(Math.floor(value / 1440), 'day')} ${format(Math.floor(value / 60) % 24, 'hour')}`;
 }
 
-export function ServerCard({ server }: { server: MinecraftServer }) {
+export function ServerCard({ server, titleHref, active, children, compact = false }: {
+  server: MinecraftServer; titleHref?: string; active?: boolean; children?: ReactNode; compact?: boolean;
+}) {
   const { language, text } = usePreferences();
-  const { address, motd, name, players, uptimeMinutes, totalUptimeMinutes, worldAgeDays, worldAgeMinutes,
-    status, lastSeenAt, modpack } = server;
+  const { address, motd, name, players, uptimeMinutes, totalUptimeMinutes, worldGameTimeTicks,
+    performance, status, lastSeenAt, modpack } = server;
   const nameId = useId();
-  const statusId = useId();
-  const [statusHint, setStatusHint] = useState<'hover' | 'focus' | 'pinned'>();
-  const statusTooltip = useRef<HTMLSpanElement>(null);
-  const statusText = status && text.serverStatus[status];
   const notify = useNotifications();
   const formatNumber = new Intl.NumberFormat(language);
+  const formatMetric = new Intl.NumberFormat(language, { maximumFractionDigits: 2 });
   const copyLabel = text.copyServerAddress(name);
   const motdParts = motd ? parseMinecraftMotd(motd) : [];
   const logo = server.logo && <img className="server-card-logo-art" src={server.logo} width={44} height={44} alt="" loading="lazy" />;
   const lastSeen = lastSeenAt !== undefined && (status === 'offline' || status === 'unavailable') ? new Date(lastSeenAt) : undefined;
   const displayedUptime = totalUptimeMinutes ?? uptimeMinutes;
-  const worldAge = worldAgeMinutes !== undefined ? formatDuration(worldAgeMinutes, language)
-    : worldAgeDays === undefined ? undefined : formatDuration(worldAgeDays, language, 'day');
-
-  useLayoutEffect(() => {
-    const tooltip = statusTooltip.current;
-    const anchor = tooltip?.parentElement;
-    if (!statusHint || !tooltip || !anchor) return;
-
-    const positionTooltip = () => {
-      const edge = 8;
-      const bounds = anchor.getBoundingClientRect();
-      const width = tooltip.offsetWidth;
-      const centered = bounds.left + (bounds.width - width) / 2;
-      const left = Math.max(edge, Math.min(centered, document.documentElement.clientWidth - width - edge));
-      tooltip.style.left = `${left - bounds.left}px`;
-      tooltip.dataset.placement = bounds.top >= tooltip.offsetHeight + edge ? 'above' : 'below';
-    };
-
-    positionTooltip();
-    window.addEventListener('resize', positionTooltip);
-    window.addEventListener('scroll', positionTooltip, true);
-    return () => {
-      window.removeEventListener('resize', positionTooltip);
-      window.removeEventListener('scroll', positionTooltip, true);
-    };
-  }, [language, lastSeenAt, name, statusHint, statusText]);
+  const displayedPlayers = players?.current ?? (compact ? undefined : players?.lastKnown);
+  const Heading = compact ? 'h2' : 'h3';
+  const worldGameDays = worldGameTimeTicks === undefined ? undefined
+    : new Intl.NumberFormat(language, { style: 'unit', unit: 'day', unitDisplay: 'narrow', maximumFractionDigits: 1 })
+      .format(worldGameTimeTenthsOfDay(worldGameTimeTicks) / 10);
+  const showPerformance = !compact && status === 'ready' && performance
+    && (performance.tps !== undefined || performance.mspt !== undefined || performance.msptP95 !== undefined);
 
   async function copyAddress() {
     if (!address) return;
@@ -88,7 +80,7 @@ export function ServerCard({ server }: { server: MinecraftServer }) {
   }
 
   return (
-    <article className="server-card" aria-labelledby={nameId}>
+    <article className="server-card" data-compact={compact || undefined} aria-labelledby={nameId}>
       <div className="server-card-header">
         {logo && (address ? (
           <button className="server-card-logo" type="button" aria-label={copyLabel} title={copyLabel} onClick={copyAddress}>
@@ -100,57 +92,50 @@ export function ServerCard({ server }: { server: MinecraftServer }) {
         ) : <span className="server-card-logo">{logo}</span>)}
         <div>
           <div className="server-card-title">
-            {status && <div className="server-card-status"
-              onPointerEnter={event => {
-                if (event.pointerType === 'mouse') setStatusHint(current => current ?? 'hover');
-              }}
-              onPointerLeave={() => setStatusHint(current => current === 'hover' ? undefined : current)}>
-              <button className="server-card-status-button" type="button" data-status={status}
-                aria-label={text.serverStatusLabel} aria-describedby={statusId}
-                onFocus={event => {
-                  if (event.currentTarget.matches(':focus-visible')) setStatusHint('focus');
-                }}
-                onBlur={() => setStatusHint(current => current === 'hover' ? current : undefined)}
-                onClick={() => setStatusHint(current => current === 'pinned' ? undefined : 'pinned')}
-                onKeyDown={event => {
-                  if (event.key === 'Escape' && statusHint) {
-                    event.stopPropagation();
-                    setStatusHint(undefined);
-                  }
-                }} />
-              <span className="server-card-status-tooltip" id={statusId} ref={statusTooltip} role="tooltip" hidden={!statusHint}>
-                {statusText}
-                {lastSeen && <span className="server-card-last-seen">{text.serverLastSeen}{' '}
-                  <time dateTime={lastSeen.toISOString()}>{new Intl.DateTimeFormat(language, {
-                    dateStyle: 'short', timeStyle: 'short',
-                  }).format(lastSeen)}</time>
-                </span>}
-              </span>
-            </div>}
-            <h3 id={nameId}>{name}</h3>
+            {status && <StatusDot status={status} label={text.serverStatusLabel} statusText={text.serverStatus[status]}
+              details={lastSeen && <>{text.serverLastSeen}{' '}
+                <time dateTime={lastSeen.toISOString()}>{new Intl.DateTimeFormat(language, {
+                  dateStyle: 'short', timeStyle: 'short',
+                }).format(lastSeen)}</time>
+              </>} />}
+            <Heading id={nameId}>{titleHref
+              ? <a href={titleHref} onClick={followPageLink} aria-current={active ? 'true' : undefined}>{name}</a>
+              : name}</Heading>
           </div>
-          {motdParts.some(part => part.text.trim()) && <p className="server-card-motd">
+          {!compact && motdParts.some(part => part.text.trim()) && <p className="server-card-motd">
             {motdParts.map(part => <span key={part.start} style={part.style}>{part.text}</span>)}
           </p>}
-          {modpack && <p className="server-card-modpack"><span>{text.serverModpack}</span> {modpack}</p>}
+          {!compact && modpack && <p className="server-card-modpack"><span>{text.serverModpack}</span> {modpack}</p>}
         </div>
       </div>
 
       <dl className="server-card-stats">
         <div>
           <dt>{text.serverPlayers}</dt>
-          <dd>{players?.current === undefined ? unavailableStat : formatNumber.format(players.current)}
+          <dd>{displayedPlayers === undefined ? unavailableStat : formatNumber.format(displayedPlayers)}
             {players?.max !== undefined && ` / ${formatNumber.format(players.max)}`}</dd>
         </div>
-        <div>
+        {!compact && <div>
           <dt>{totalUptimeMinutes === undefined ? text.serverUptime : text.serverTotalUptime}</dt>
           <dd>{displayedUptime === undefined ? unavailableStat : formatDuration(displayedUptime, language)}</dd>
-        </div>
-        {worldAge !== undefined && <div>
-          <dt>{text.serverWorldAge}</dt>
-          <dd>{worldAge}</dd>
+        </div>}
+        {!compact && worldGameDays !== undefined && <div>
+          <dt>{text.serverWorldPlayTime}</dt>
+          <dd>{worldGameDays}</dd>
         </div>}
       </dl>
+      {showPerformance && <div className="server-card-performance">
+        <dl className="server-card-stats">
+          {performance.tps !== undefined && <div><dt>TPS</dt><dd>{formatMetric.format(performance.tps)}</dd></div>}
+          {performance.mspt !== undefined && <div><dt>MSPT</dt><dd>{formatMetric.format(performance.mspt)} ms</dd></div>}
+          {performance.msptP95 !== undefined && <div><dt>MSPT p95</dt><dd>{formatMetric.format(performance.msptP95)} ms</dd></div>}
+        </dl>
+        {(performance.mspt !== undefined || performance.msptP95 !== undefined) &&
+          <details className="server-card-performance-help">
+            <summary aria-label={`${text.information} · MSPT`}>?</summary>
+            <p>{tickPerformanceHelp[language]}</p>
+          </details>}
+      </div>}
 
       {address && <div className="server-card-connection" role="group" aria-labelledby={nameId + '-address'}>
         <span className="server-card-address-label" id={nameId + '-address'}>{text.serverAddress}</span>
@@ -165,6 +150,7 @@ export function ServerCard({ server }: { server: MinecraftServer }) {
           </button>
         </div>
       </div>}
+      {children}
     </article>
   );
 }

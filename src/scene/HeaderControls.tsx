@@ -1,11 +1,9 @@
 import { usePreferences } from '../PreferencesProvider';
-import { buttonColors, dyeColors, languageOptions } from '../preferences';
-import { HeaderPicker } from './HeaderPicker';
+import { HeaderAppearanceControls } from './HeaderAppearanceControls';
 import { HeaderSignIn } from './HeaderSignIn';
-import './header-controls.css';
 
 export function HeaderControls() {
-  const { language, buttonColor, introAnimation, text, update } = usePreferences();
+  const { introAnimation, text, update } = usePreferences();
 
   return (
     <div className="header-controls">
@@ -21,14 +19,7 @@ export function HeaderControls() {
         <span className="header-intro-label">{text.intro}</span>
         <span className="header-intro-track" aria-hidden="true" />
       </button>
-      <HeaderPicker
-        label={text.buttonColor}
-        value={buttonColor}
-        swatches
-        options={buttonColors.map(color => ({ value: color, label: text.colors[color], swatchColor: dyeColors[color] }))}
-        onChange={buttonColor => update({ buttonColor })}
-      />
-      <HeaderPicker label={text.language} value={language} options={languageOptions} onChange={language => update({ language })} />
+      <HeaderAppearanceControls />
       <HeaderSignIn />
     </div>
   );

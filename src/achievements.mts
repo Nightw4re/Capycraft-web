@@ -1,9 +1,12 @@
 import { isItemId } from './items/itemRoutes.mts';
+import { readProgressPosition, type ProgressPosition } from './progressLayout.mts';
 
 export const achievementsPath = '/api/achievements';
-export type Advancement = { id: string; title: string; description: string; frame: 'task' | 'goal' | 'challenge' };
+export type Advancement = { id: string; title: string; description: string; frame: 'task' | 'goal' | 'challenge';
+  group?: string; groupTitle?: string; iconItemId?: string; position?: ProgressPosition; dependencyIds?: string[] };
 export type AchievementCatalog = { total: number; advancements: Advancement[] };
-export type AchievementProgress = AchievementCatalog & { player: string; completed: number; completedIds: string[] };
+export type AchievementProgress = AchievementCatalog & { player: string; completed: number; completedIds: string[];
+  completedAt?: Record<string, number> };
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -24,7 +27,16 @@ export function readAchievementCatalog(data: unknown, player?: string): Achievem
       || typeof description !== 'string' || description.length > 4096
       || (frame !== 'task' && frame !== 'goal' && frame !== 'challenge')) return;
     ids.add(id);
-    advancements.push({ id, title, description, frame });
+    const position = readProgressPosition(entry.x, entry.y) ?? (record(entry.position)
+      ? readProgressPosition(entry.position.x, entry.position.y) : undefined);
+    const parent = isItemId(entry.parentId) ? entry.parentId
+      : Array.isArray(entry.dependencyIds) && isItemId(entry.dependencyIds[0]) ? entry.dependencyIds[0] : undefined;
+    advancements.push({ id, title, description, frame, ...(position && { position }),
+      ...(parent && parent.length <= 512 && parent !== id && { dependencyIds: [parent] }),
+      ...(isItemId(entry.group) && { group: entry.group }),
+      ...(typeof entry.groupTitle === 'string' && entry.groupTitle.length <= 512 && { groupTitle: entry.groupTitle }),
+      ...(isItemId(entry.iconItemId) && { iconItemId: entry.iconItemId }),
+    });
   }
   const result = { total: advancements.length, advancements };
   if (player === undefined) return result;
@@ -35,5 +47,13 @@ export function readAchievementCatalog(data: unknown, player?: string): Achievem
     if (typeof id !== 'string' || !ids.has(id) || completedIds.has(id)) return;
     completedIds.add(id);
   }
-  return { ...result, player: data.player, completed: completedIds.size, completedIds: Array.from(completedIds) };
+  const completedAt: Record<string, number> = {};
+  if (record(data.completedAt)) {
+    for (const [id, time] of Object.entries(data.completedAt)) {
+      if (completedIds.has(id) && typeof time === 'number' && Number.isSafeInteger(time)
+        && time > 0 && time <= 8.64e15) completedAt[id] = time;
+    }
+  }
+  return { ...result, player: data.player, completed: completedIds.size, completedIds: Array.from(completedIds),
+    ...(Object.keys(completedAt).length && { completedAt }) };
 }

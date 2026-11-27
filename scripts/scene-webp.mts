@@ -39,6 +39,10 @@ export async function sceneBackdropPath(root: string) {
   return (await sceneImage(root, sceneImages[0])).output;
 }
 
+export async function sceneLogoPath(root: string) {
+  return (await sceneImage(root, sceneImages[2])).output;
+}
+
 export function sceneWebp(root: string): Plugin {
   let images: Awaited<ReturnType<typeof sceneImage>>[] = [];
   const sources = new Set(sceneImages.map(({ name }) => normalizePath(resolve(root, `assets/${name}.png`))));

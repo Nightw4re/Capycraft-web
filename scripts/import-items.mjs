@@ -10,9 +10,13 @@ import sharp from 'sharp';
 import yauzl from 'yauzl';
 import layout from '../src/items/catalogLayout.json' with { type: 'json' };
 import { lookupSlot, readItemBar, readTooltipAlternatives, searchText } from '../src/items/catalogIndex.mjs';
+import { atlasIconName, atlasRows } from '../src/items/previewAtlas.mts';
+import { readCatalogImportDurations } from '../src/liveUpdates.mts';
 import { defaultAlias } from '../src/minecraftServers.mjs';
 import { catalogDatabasePath, catalogStorage, createCatalogDatabase, hasCatalogDatabase } from '../server/catalogAssets.mts';
 import { instanceDirectory, itemCatalogDirectory, loadInstances } from '../server/instances.mts';
+import { ponderStorage } from '../server/ponderStorage.mts';
+import { preparePonderImport } from './import-ponder.mjs';
 import { addRecipeUses, createRecipeUsesIndex, recipeUsesIndexFile } from '../server/recipeUsesIndex.mjs';
 import { recipeUsesDatabasePath, writeStoredRecipeUses } from '../server/recipeUsesStore.mts';
 
@@ -21,14 +25,18 @@ const itemId = /^[a-z0-9_.-]+:[a-z0-9_./-]+$/;
 const previewPath = /^(?:previews|animations)\/[a-f0-9]{64}\.(?:png|webp)$/;
 const revisionId = /^[a-f0-9]{64}$/;
 const pngSignature = Buffer.from('89504e470d0a1a0a', 'hex');
-const atlasRows = layout.pageSize / layout.atlasColumns;
-const webpOptions = { lossless: true, effort: 4 };
+const atlasIndexPath = 'previews/atlas-index.json';
+const atlasDirectory = 'previews/atlases/';
+const atlasPath = /^previews\/atlases\/[a-f0-9]{64}\.webp$/;
+const maxAtlasIndexBytes = 32 * 1024 * 1024;
+const maxAtlasBytes = 4 * 1024 * 1024;
 const folders = ['icons', 'details', 'atlases', 'pages', 'lookup', 'search', 'payloads'];
 const manifestName = 'catalog.json';
 const recipeItemPreviewPath = 'catalog-data/recipe-item-previews.json';
-const maxRecipeItemPreviewBytes = 16 * 1024 * 1024;
+const advancementPreviewPath = 'catalog-data/advancement-previews.json';
+const maxPreviewIndexBytes = 16 * 1024 * 1024;
 const recipeDataVersion = 7;
-const previewDataVersion = 2;
+const previewDataVersion = 4;
 const searchDataVersion = 1;
 const fluidRecipePath = /^catalog-data\/machine-recipes\/fluids\/([a-z0-9_.-]+)\/([a-z0-9_./-]+)\.json$/;
 const catalogDocumentPath = /^catalog-data\/(?:tooltips|stacks|recipes|recipe-tags|machine-recipes\/(?:items|fluids|groups))\/.+\.json$/;
@@ -44,8 +52,7 @@ function digest(data) {
 async function createFileStore(destination) {
   for (const folder of folders) await mkdir(join(destination, folder));
   return {
-    read: (folder, name) => readFile(join(destination, folder, name)),
-    write: (folder, name, data, options) => writeFile(join(destination, folder, name), data, options),
+    write: (folder, name, data) => writeFile(join(destination, folder, name), data),
   };
 }
 
@@ -80,7 +87,7 @@ async function writeCatalog(store, items, atlases, metadata, publishedFiles) {
   const lookup = [];
   for (const bucket of buckets) lookup.push(bucket.length ? await writeJson(store, 'lookup', bucket, publishedFiles.lookup) : null);
 
-  const searchItems = items.map(({ sprite, ...item }) => ({
+  const searchItems = items.map(item => ({
     ...item, search: searchText(`${item.name} ${item.fluidId ?? item.id}`),
   }));
   const search = await writeJson(store, 'search', { items: searchItems, order }, publishedFiles.search);
@@ -94,50 +101,60 @@ async function hashArchive(path) {
   return hash.digest('hex');
 }
 
-function isAnimatedPng(png) {
-  for (let offset = pngSignature.length; offset + 12 <= png.length; offset += png.readUInt32BE(offset) + 12) {
-    const type = png.toString('ascii', offset + 4, offset + 8);
-    if (type === 'acTL') return true;
-    if (type === 'IDAT') return false;
+function isLosslessWebp(image) {
+  if (image.length < 20 || image.toString('ascii', 0, 4) !== 'RIFF'
+    || image.readUInt32LE(4) !== image.length - 8 || image.toString('ascii', 8, 12) !== 'WEBP') return false;
+  let lossless = false;
+  let offset = 12;
+  while (offset + 8 <= image.length) {
+    const chunk = image.toString('ascii', offset, offset + 4);
+    const length = image.readUInt32LE(offset + 4);
+    if (chunk === 'VP8 ' || chunk === 'ANIM' || chunk === 'ANMF' || (chunk === 'VP8L' && lossless)) return false;
+    if (chunk === 'VP8L') lossless = true;
+    offset += 8 + length + (length % 2);
   }
-  return false;
+  return lossless && offset === image.length;
 }
 
-async function writeAtlas(items, store, atlasIndex, animatedIcons, pace) {
-  const page = items.filter(item => item.icon && !animatedIcons.has(item.icon));
-  if (!page.length) return undefined;
-  const width = layout.tileSize * layout.atlasColumns;
-  const height = layout.tileSize * atlasRows;
-  const tileStride = layout.tileSize * 4;
-  const pixels = Buffer.alloc(width * height * 4);
-  const tiles = new Map();
-  for (const item of page) {
-    let position = tiles.get(item.icon);
-    if (position === undefined) {
-      await pace();
-      position = tiles.size;
-      // Buffer input lets publication move or remove the directory on Windows.
-      const tile = await sharp(await store.read('icons', item.icon))
-        .resize(layout.tileSize, layout.tileSize, {
-          fit: 'contain', kernel: 'nearest', background: { r: 0, g: 0, b: 0, alpha: 0 },
-        }).ensureAlpha().raw().toBuffer();
-      const x = (position % layout.atlasColumns) * layout.tileSize;
-      const y = Math.floor(position / layout.atlasColumns) * layout.tileSize;
-      for (let row = 0; row < layout.tileSize; row++) {
-        tile.copy(pixels, ((y + row) * width + x) * 4, row * tileStride, (row + 1) * tileStride);
-      }
-      tiles.set(item.icon, position);
+async function importPreviewAtlases(entries, read, store, pace) {
+  const entry = entries.get(atlasIndexPath);
+  const icons = new Map();
+  if (!entry) return { atlases: [], icons };
+  if (entry.uncompressedSize > maxAtlasIndexBytes) throw new Error('Preview atlas index is too large.');
+  const { version, tileSize, columns, rows, atlases, sprites } = JSON.parse(
+    new TextDecoder('utf-8', { fatal: true }).decode(await read(entry)),
+  ) ?? {};
+  if (version !== 1 || tileSize !== layout.tileSize || columns !== layout.atlasColumns || rows !== atlasRows
+    || !Array.isArray(atlases) || atlases.some(hash => typeof hash !== 'string' || !revisionId.test(hash))
+    || !sprites || typeof sprites !== 'object' || Array.isArray(sprites)) {
+    throw new Error('Invalid preview atlas index.');
+  }
+  for (const [key, tile] of Object.entries(sprites)) {
+    const [index, position] = Array.isArray(tile) && tile.length === 2 ? tile : [];
+    if (!revisionId.test(key) || !Number.isSafeInteger(index) || index < 0 || index >= atlases.length
+      || !Number.isSafeInteger(position) || position < 0 || position >= layout.pageSize) {
+      throw new Error(`Invalid preview atlas tile for ${key}.`);
     }
-    item.sprite = atlasIndex * layout.pageSize + position;
+    icons.set(key, atlasIconName(atlases[index], position));
   }
-  const image = await sharp(pixels, { raw: { width, height, channels: 4 } }).webp(webpOptions).toBuffer();
-  const name = digest(image);
-  try {
-    await store.write('atlases', `${name}.webp`, image, { flag: 'wx' });
-  } catch (error) {
-    if (error.code !== 'EEXIST') throw error;
+  for (const hash of new Set(atlases)) {
+    const path = `${atlasDirectory}${hash}.webp`;
+    const imageEntry = entries.get(path);
+    if (!imageEntry || imageEntry.uncompressedSize > maxAtlasBytes) {
+      throw new Error(`Missing or oversized preview atlas: ${path}`);
+    }
+    await pace();
+    const image = await read(imageEntry, true);
+    if (digest(image) !== hash || !isLosslessWebp(image)) throw new Error(`Invalid preview atlas: ${path}`);
+    const metadata = await sharp(image).metadata().catch(cause => {
+      throw new Error(`Invalid preview atlas: ${path}`, { cause });
+    });
+    if (metadata.format !== 'webp' || metadata.width !== columns * tileSize || metadata.height !== rows * tileSize) {
+      throw new Error(`Invalid preview atlas dimensions: ${path}`);
+    }
+    await store.write('atlases', `${hash}.webp`, image);
   }
-  return name;
+  return { atlases, icons };
 }
 
 async function moveFile(source, destination) {
@@ -179,7 +196,7 @@ function createPacer() {
   };
 }
 
-async function readArchive(path, store, publish, pace, report, useAtlases, indexedRecipeUses = false) {
+async function readArchive(path, store, publish, pace, report, indexedRecipeUses = false) {
   const zipStarted = performance.now();
   const zip = await yauzl.openPromise(path, { autoClose: false, strictFileNames: true });
   const entries = new Map();
@@ -190,7 +207,11 @@ async function readArchive(path, store, publish, pace, report, useAtlases, index
   try {
     for await (const entry of zip.eachEntry()) {
       const name = entry.fileName;
-      if (name !== 'format.txt' && name !== 'catalog.json' && name !== recipeItemPreviewPath
+      if (name.startsWith(atlasDirectory) && name !== atlasDirectory && !atlasPath.test(name)) {
+        throw new Error(`Invalid preview atlas path: ${name}`);
+      }
+      if (name !== 'format.txt' && name !== 'catalog.json' && name !== recipeItemPreviewPath && name !== advancementPreviewPath
+        && name !== atlasIndexPath && !atlasPath.test(name)
         && !previewPath.test(name) && !fluidTexturePath.test(name)
         && !catalogDocumentPath.test(name) && !bundlePath.test(name)) continue;
       if (entries.has(name)) throw new Error(`Duplicate export entry: ${name}`);
@@ -222,9 +243,11 @@ async function readArchive(path, store, publish, pace, report, useAtlases, index
     const rows = JSON.parse((await read(index)).toString());
     if (!Array.isArray(rows)) throw new Error('Expected an array in catalog.json.');
 
+    const atlasStarted = performance.now();
+    const { atlases, icons: atlasIcons } = await importPreviewAtlases(entries, read, store, pace);
+    const atlasMs = entries.has(atlasIndexPath) ? performance.now() - atlasStarted : 0;
     const imported = new Map();
     const written = new Set();
-    const animatedIcons = new Set();
     const writtenPayloads = new Set();
     const tooltipShortcuts = new Map();
     const bundledDocuments = new Map();
@@ -258,6 +281,7 @@ async function readArchive(path, store, publish, pace, report, useAtlases, index
     async function importIcon(key, folder = 'previews') {
       if (typeof key !== 'string') return undefined;
       const animated = folder === 'previews' ? entries.get(`animations/${key}.webp`) ?? entries.get(`animations/${key}.png`) : undefined;
+      if (!animated && folder === 'previews' && atlasIcons.has(key)) return atlasIcons.get(key);
       const entry = animated ?? entries.get(`${folder}/${key}.webp`) ?? entries.get(`${folder}/${key}.png`);
       if (!entry) return undefined;
       if (imported.has(entry.fileName)) return imported.get(entry.fileName);
@@ -266,18 +290,13 @@ async function readArchive(path, store, publish, pace, report, useAtlases, index
       const webp = entry.fileName.endsWith('.webp');
       const filename = `${digest(image)}.${webp ? 'webp' : 'png'}`;
       if (!written.has(filename)) {
-        if (useAtlases) await pace();
         if (webp) {
-          const { format, pages = 1 } = await sharp(image).metadata().catch(cause => {
+          const { format } = await sharp(image).metadata().catch(cause => {
             throw new Error(`Invalid WebP in ${entry.fileName}`, { cause });
           });
           if (format !== 'webp') throw new Error(`Invalid WebP in ${entry.fileName}`);
-          if (useAtlases && pages > 1) animatedIcons.add(filename);
-        } else {
-          if (!image.subarray(0, pngSignature.length).equals(pngSignature)) {
-            throw new Error(`Invalid PNG in ${entry.fileName}`);
-          }
-          if (useAtlases && isAnimatedPng(image)) animatedIcons.add(filename);
+        } else if (!image.subarray(0, pngSignature.length).equals(pngSignature)) {
+          throw new Error(`Invalid PNG in ${entry.fileName}`);
         }
         await store.write('icons', filename, image);
         written.add(filename);
@@ -467,22 +486,26 @@ async function readArchive(path, store, publish, pace, report, useAtlases, index
       seen.add(row.id);
       row.name = typeof row.name === 'string' && row.name.trim() ? row.name : row.id;
     }
-    const recipePreviewEntry = entries.get(recipeItemPreviewPath);
-    let recipeItemIcons;
-    if (recipePreviewEntry) {
-      if (recipePreviewEntry.uncompressedSize > maxRecipeItemPreviewBytes) {
-        throw new Error('Recipe item preview index is too large.');
+    async function importPreviewIndex(path, exclude) {
+      const entry = entries.get(path);
+      if (!entry) return;
+      if (entry.uncompressedSize > maxPreviewIndexBytes) {
+        throw new Error(`Preview index is too large: ${path}`);
       }
-      const keys = JSON.parse((await read(recipePreviewEntry)).toString('utf8'));
-      if (!keys || typeof keys !== 'object' || Array.isArray(keys)) throw new Error('Invalid recipe item preview index.');
+      const keys = JSON.parse((await read(entry)).toString('utf8'));
+      if (!keys || typeof keys !== 'object' || Array.isArray(keys)) throw new Error(`Invalid preview index: ${path}`);
       const icons = Object.create(null);
       for (const [id, key] of Object.entries(keys)) {
-        if (seen.has(id) || !itemId.test(id) || typeof key !== 'string' || !revisionId.test(key)) continue;
+        if (exclude?.has(id) || !itemId.test(id) || typeof key !== 'string' || !revisionId.test(key)) continue;
         const icon = await importIcon(key);
         if (icon) icons[id] = icon;
       }
-      if (Object.keys(icons).length) recipeItemIcons = await writeJson(store, 'payloads', icons);
+      if (Object.keys(icons).length) return writeJson(store, 'payloads', icons);
     }
+    const previewIndexes = {
+      recipeItemIcons: await importPreviewIndex(recipeItemPreviewPath, seen),
+      advancementIcons: await importPreviewIndex(advancementPreviewPath),
+    };
     const fluids = new Map();
     for (const path of fluidRecipePaths) {
       const [, namespace, resource] = fluidRecipePath.exec(path);
@@ -507,20 +530,13 @@ async function readArchive(path, store, publish, pace, report, useAtlases, index
       fluids.set(id, machine);
       rows.push({ id, name, previewKey: machine.previewKey, fluidIcon: outputs.find(output => output.icon)?.icon });
     }
-    await report.setPhase('processing', { loaded: 0, expected: rows.length });
+    await report.setStage('items', 'processing', 'Import item previews and data', { loaded: 0, expected: rows.length });
     const items = [];
-    const atlases = [];
-    let atlasMs = 0;
-    const appendAtlas = async size => {
-      const start = performance.now();
-      const atlas = await writeAtlas(items.slice(-size), store, atlases.length, animatedIcons, pace);
-      atlasMs += performance.now() - start;
-      if (atlas) atlases.push(atlas);
-    };
     let checkpoint = { count: 0, at: Date.now() };
-    if (publish) await publish(items, atlases, rows.length, [], recipeItemIcons);
+    if (publish) await publish(items, atlases, rows.length, [], previewIndexes);
     for (const position of catalogOrder(rows, 'cs')) {
       const row = rows[position];
+      report.setItem(row.id);
       const itemPath = row.id.replace(':', '/');
       const fluid = fluids.get(row.id);
       const icon = await importIcon(row.previewKey) ?? (fluid ? row.fluidIcon : undefined);
@@ -550,24 +566,20 @@ async function readArchive(path, store, publish, pace, report, useAtlases, index
       items.push({
         id: row.id, name: row.name, icon, detail, bar: readItemBar(row.bar), fluidId: fluid?.fluidId, tooltipShortcutIds, ...search,
       });
-      if (items.length % layout.pageSize === 0) {
-        if (useAtlases) await appendAtlas(layout.pageSize);
-        else await pace();
-      }
+      if (items.length % layout.pageSize === 0) await pace();
       report.setLoaded(items.length);
       const sinceCheckpoint = Date.now() - checkpoint.at;
       if (publish && (items.length === 1 || (items.length - checkpoint.count >= 500 && sinceCheckpoint >= 5000)
         || sinceCheckpoint >= 30000)) {
-        await publish(items, atlases, rows.length, [...tooltipShortcuts.values()], recipeItemIcons);
+        await publish(items, atlases, rows.length, [...tooltipShortcuts.values()], previewIndexes);
         checkpoint = { count: items.length, at: Date.now() };
       }
     }
 
-    const remaining = items.length % layout.pageSize;
-    if (useAtlases && remaining) await appendAtlas(remaining);
-    if (indexedRecipeUses) await writeStoredRecipeUses(store, recipeUses);
+    await report.setStage('recipe-index', 'processing', 'Write recipe uses index');
+    if (indexedRecipeUses) await writeStoredRecipeUses(store, recipeUses, report.setRecipeUses);
     else await store.write('search', recipeUsesIndexFile, JSON.stringify(recipeUses));
-    return { items, atlases, tooltipShortcuts: [...tooltipShortcuts.values()], recipeItemIcons,
+    return { items, atlases, tooltipShortcuts: [...tooltipShortcuts.values()], previewIndexes,
       images: written.size, atlasMs, archiveStats };
   } finally {
     zip.close();
@@ -593,37 +605,124 @@ async function replaceCatalogJson(output, filename, data) {
   }
 }
 
-async function publishImportStatus(output, revision, state, activity) {
-  try {
-    await replaceCatalogJson(output, layout.statusFile, { state, revision, updatedAt: Date.now(), ...activity });
-  } catch (error) {
-    console.warn(`Could not publish item import status: ${error.message}`);
+function reportImport(output, revision, server, source, lastStageDurations) {
+  const logDirectory = join(root, 'data', 'item-import-logs', server);
+  const logPath = join(logDirectory, 'latest.log');
+  const startedAt = performance.now();
+  let logging = true;
+  function warnLog(error) {
+    logging = false;
+    console.warn(`Could not write item import log: ${error.message}`);
   }
-}
+  async function append(entry) {
+    if (!logging) return;
+    await writeFile(logPath, `${JSON.stringify(entry)}\n`, {
+      mode: 0o600, flag: entry.event === 'started' ? 'w' : 'a',
+    }).catch(warnLog);
+  }
 
-function reportImport(output, revision) {
   let phase = 'preparing';
+  let stage = 'preparing';
+  let stagePlan;
+  let stageStartedAt = startedAt;
+  const stageDurations = {};
+  let step = 'Hash source archive';
   let progress;
-  const write = state => publishImportStatus(output, revision, state, state === 'running' ? { phase, progress } : undefined);
-  let pending = write('running');
-  function queue(state) {
-    pending = pending.then(() => write(state));
+  let item;
+  let recipeUses;
+  let lastProgressWrite = performance.now();
+  let progressWritePending = false;
+  let pending = mkdir(logDirectory, { recursive: true, mode: 0o700 }).then(async () => {
+    const entries = await readdir(logDirectory, { withFileTypes: true });
+    await Promise.all(entries.filter(entry => entry.isFile()
+      && /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z-[a-f0-9]{12}\.log$/.test(entry.name))
+      .map(entry => rm(join(logDirectory, entry.name), { force: true })));
+  }).catch(error => console.warn(`Could not prepare item import logs: ${error.message}`));
+  function queue(event, state = 'running', statusRevision = revision, details) {
+    const stageElapsedMs = Math.round(performance.now() - stageStartedAt);
+    const activity = { phase, stage, stagePlan, stageElapsedMs, progress: progress && { ...progress } };
+    const historicalDurations = lastStageDurations;
+    const recipeIndexProgress = stage === 'recipe-index' && recipeUses?.totalIngredients > 0
+      ? { indexed: recipeUses.indexedIngredients, total: recipeUses.totalIngredients }
+      : undefined;
+    const entry = {
+      time: new Date().toISOString(), elapsedMs: Math.round(performance.now() - startedAt),
+      event, state, revision: statusRevision, ...activity, step, item, recipeUses, ...details,
+    };
+    pending = pending.then(async () => {
+      if (event !== 'progress') await append(entry);
+      if (event === 'step') return;
+      const status = {
+        state, revision: statusRevision, updatedAt: Date.now(), lastStageDurations: historicalDurations,
+        ...(state === 'running' && { ...activity, recipeIndexProgress }),
+      };
+      try {
+        await replaceCatalogJson(output, layout.statusFile, status);
+      } catch (error) {
+        console.warn(`Could not publish item import status: ${error.message}`);
+        await append({ ...entry, event: 'status-write-failed', error: error.message });
+      }
+    });
     return pending;
   }
-  const timer = setInterval(() => { void queue('running'); }, layout.statusHeartbeatMs);
+  const started = queue('started', 'running', revision, { server, archive: source }).then(() => {
+    if (logging) console.log(`Item import log: ${logPath}`);
+  });
+  const timer = setInterval(() => { void queue('heartbeat'); }, layout.statusHeartbeatMs);
+  function publishProgress() {
+    const now = performance.now();
+    if (progressWritePending || now - lastProgressWrite < 2000) return;
+    lastProgressWrite = now;
+    progressWritePending = true;
+    void queue('progress').finally(() => { progressWritePending = false; });
+  }
+  function finishStage(now) {
+    stageDurations[stage] = Math.max(1, Math.round(now - stageStartedAt));
+  }
   return {
-    started: pending,
-    setPhase(next, counts = progress) {
-      phase = next;
+    started,
+    setPlan(plan) {
+      stagePlan = plan;
+      return queue('plan');
+    },
+    setStage(nextStage, nextPhase, nextStep, counts) {
+      if (nextStage !== stage) {
+        const now = performance.now();
+        finishStage(now);
+        stageStartedAt = now;
+      }
+      stage = nextStage;
+      phase = nextPhase;
+      step = nextStep;
       progress = counts;
-      return queue('running');
+      item = undefined;
+      lastProgressWrite = performance.now();
+      return queue('phase');
+    },
+    setStep(next) {
+      step = next;
+      item = undefined;
+      return queue('step');
+    },
+    setItem(id) {
+      item = id;
     },
     setLoaded(loaded) {
       progress.loaded = loaded;
+      publishProgress();
     },
-    async finish(state) {
+    setRecipeUses(details) {
+      recipeUses = details;
+      publishProgress();
+    },
+    async finish(state, statusRevision, error) {
       clearInterval(timer);
-      await queue(state);
+      if (state === 'succeeded') {
+        finishStage(performance.now());
+        lastStageDurations = { ...lastStageDurations, ...stageDurations };
+      }
+      await queue('finished', state, statusRevision, error && { error: error.stack ?? String(error) });
+      if (state === 'succeeded' && logging) await rm(logPath, { force: true }).catch(warnLog);
     },
   };
 }
@@ -664,7 +763,7 @@ async function cleanPreviousImports(output, current) {
   }
 }
 
-async function importRevision(output, archive, sourceHash, active, revision, report, useSqlite) {
+export async function importRevision(output, archive, sourceHash, active, revision, report, useSqlite) {
   const previousRevision = active?.state === 'ready' && revisionId.test(active.revision) ? active.revision : undefined;
   const legacyBackup = active?.version === 1 || active?.version === 2;
   const progressive = !previousRevision && !legacyBackup;
@@ -681,20 +780,21 @@ async function importRevision(output, archive, sourceHash, active, revision, rep
   const storage = useSqlite ? catalogStorage : undefined;
   try {
     store = useSqlite ? await createCatalogDatabase(staging, progressive) : await createFileStore(staging);
-    const publish = progressive ? async (items, atlases, expected, tooltipShortcuts, recipeItemIcons) => {
+    const publish = progressive ? async (items, atlases, expected, tooltipShortcuts, previewIndexes) => {
       const manifest = await writeCatalog(store, items, [...atlases], {
-        sourceHash, revision, storage, state: 'importing', expected, tooltipShortcuts, recipeItemIcons,
+        sourceHash, revision, storage, state: 'importing', expected, tooltipShortcuts, ...previewIndexes,
       }, publishedFiles);
       store.checkpoint?.();
       await replaceCatalogJson(output, manifestName, manifest);
       partial = manifest;
     } : undefined;
-    const result = await readArchive(archive, store, publish, createPacer(), report, !useSqlite, useSqlite);
-    await report.setPhase('publishing');
+    const result = await readArchive(archive, store, publish, createPacer(), report, useSqlite);
+    await report.setStage('publishing', 'publishing', 'Verify source archive');
     if (await hashArchive(archive) !== sourceHash) throw new Error('The WebCraft archive changed during import. Run the import again.');
+    await report.setStep('Write catalog indexes and publish revision');
     const current = await writeCatalog(store, result.items, result.atlases, {
       sourceHash, revision, previousRevision, legacyBackup, recipeDataVersion, previewDataVersion, searchDataVersion, storage,
-      state: 'ready', expected: result.items.length, tooltipShortcuts: result.tooltipShortcuts, recipeItemIcons: result.recipeItemIcons,
+      state: 'ready', expected: result.items.length, tooltipShortcuts: result.tooltipShortcuts, ...result.previewIndexes,
     }, publishedFiles);
     store.finish?.();
     const metrics = { ...result.archiveStats, ...store.stats?.(), durationMs: Math.round(performance.now() - started) };
@@ -713,7 +813,7 @@ async function importRevision(output, archive, sourceHash, active, revision, rep
     await replaceCatalogJson(output, manifestName, current);
     committed = true;
     await cleanPreviousImports(output, current);
-    console.log(`Imported ${result.items.length} items and ${result.images} previews. ${JSON.stringify(metrics)}`);
+    console.log(`Imported ${result.items.length} items, ${result.images} standalone previews and ${result.atlases.length} atlases. ${JSON.stringify(metrics)}`);
   } catch (error) {
     if (partial && !committed) await replaceCatalogJson(output, manifestName, { ...partial, state: 'failed' });
     throw error;
@@ -744,28 +844,69 @@ async function inboxArchive(inbox) {
   return processing;
 }
 
-async function importArchive(output, source, skipCurrent, useSqlite) {
-  const sourceHash = await hashArchive(source);
-  const active = await activeManifest(output);
-  const storage = useSqlite ? catalogStorage : undefined;
-  if (skipCurrent && active?.version === layout.version && active.recipeDataVersion === recipeDataVersion
-    && active.previewDataVersion === previewDataVersion && active.searchDataVersion === searchDataVersion && active.storage === storage
-    && active.state === 'ready' && active.sourceHash === sourceHash && Array.isArray(active.tooltipShortcuts)
-    && revisionId.test(active.revision) && (!useSqlite || hasCatalogDatabase(join(output, 'revisions', active.revision)))) {
-    await cleanPreviousImports(output, active);
-    await publishImportStatus(output, active.revision, 'succeeded');
-    console.log('Item catalog is up to date.');
-    return;
-  }
+async function importArchive(output, source, skipCurrent, useSqlite, server) {
   const revision = randomBytes(32).toString('hex');
-  const status = reportImport(output, revision);
+  const lastStageDurations = await readFile(join(output, layout.statusFile), 'utf8')
+    .then(contents => readCatalogImportDurations(JSON.parse(contents)?.lastStageDurations))
+    .catch(() => undefined);
+  const status = reportImport(output, revision, server, source, lastStageDurations);
   await status.started;
+  let ponder;
+  let statusRevision = revision;
+  let active;
+  let catalogUnchanged = false;
   try {
-    await importRevision(output, source, sourceHash, active, revision, status, useSqlite);
-    await status.finish('succeeded');
+    const sourceHash = await hashArchive(source);
+    await status.setStage('reading', 'preparing', 'Read export and validate Ponder data');
+    ponder = await preparePonderImport(source, ponderStorage(root, server), sourceHash, revision, createPacer(), {
+      async plan({ hasCatalog, writeScenes, writeDefinitions }) {
+        const plan = ['preparing', 'reading'];
+        if (writeScenes) plan.push('ponder-scenes');
+        if (writeDefinitions) plan.push('ponder-definitions');
+        if (hasCatalog) {
+          active = await activeManifest(output);
+          const storage = useSqlite ? catalogStorage : undefined;
+          catalogUnchanged = skipCurrent && active?.version === layout.version && active.recipeDataVersion === recipeDataVersion
+            && active.previewDataVersion === previewDataVersion && active.searchDataVersion === searchDataVersion && active.storage === storage
+            && active.state === 'ready' && active.sourceHash === sourceHash && Array.isArray(active.tooltipShortcuts)
+            && revisionId.test(active.revision) && (!useSqlite || hasCatalogDatabase(join(output, 'revisions', active.revision)));
+          if (!catalogUnchanged) plan.push('items', 'recipe-index');
+        }
+        if (plan.length > 2) plan.push('publishing');
+        await status.setPlan(plan);
+      },
+      start(stage, expected) {
+        const step = stage === 'ponder-scenes' ? 'Process Ponder scenes' : 'Validate and store Ponder definitions';
+        return status.setStage(stage, 'processing', step, { loaded: 0, expected });
+      },
+      advance: status.setLoaded,
+    });
+    if (!ponder.hasCatalog && !ponder.publish && !ponder.current) {
+      throw new Error('The archive contains no item catalog, Ponder scenes, or Ponder definitions.');
+    }
+    if (ponder.hasCatalog) {
+      if (catalogUnchanged) {
+        await cleanPreviousImports(output, active);
+        statusRevision = active.revision;
+        console.log('Item catalog is up to date.');
+      } else {
+        await status.setStage('items', 'processing', 'Read archive and prepare item data');
+        await importRevision(output, source, sourceHash, active, revision, status, useSqlite);
+      }
+    }
+    if (ponder.publish) {
+      await status.setStage('publishing', 'publishing', 'Publish Ponder data');
+      if (await hashArchive(source) !== sourceHash) throw new Error('The WebCraft archive changed during import. Run the import again.');
+      await ponder.publish();
+      if (ponder.scenes !== undefined) console.log('Published ' + ponder.scenes + ' Ponder scenes.');
+      if (ponder.definitions !== undefined) console.log('Imported ' + ponder.definitions + ' Ponder definitions.');
+    }
+    await status.finish('succeeded', ponder.current && !ponder.hasCatalog ? ponder.current : statusRevision);
   } catch (error) {
-    await status.finish('failed');
+    await status.finish('failed', revision, error);
     throw error;
+  } finally {
+    await ponder?.discard?.();
   }
 }
 
@@ -789,7 +930,7 @@ async function run(archive, inbox, useSqlite = true) {
     if (!source) return;
     const failedArchive = inbox && join(inbox, '.failed.zip');
     try {
-      await importArchive(output, source, Boolean(inbox), useSqlite);
+      await importArchive(output, source, Boolean(inbox), useSqlite, server);
     } catch (error) {
       if (failedArchive) {
         try { await moveFile(source, failedArchive); } catch (moveError) {
@@ -822,20 +963,20 @@ async function main([argument, ...extra]) {
   return run(undefined, inbox, argument === '--inbox-sqlite');
 }
 
-export async function benchmarkCatalogImport(archive, store, useAtlases) {
+export async function benchmarkCatalogImport(archive, store, indexedRecipeUses = false) {
   sharp.concurrency(1);
   const started = performance.now();
   const result = await readArchive(archive, store, undefined, () => {}, {
-    setPhase() {}, setLoaded() {},
-  }, useAtlases);
+    setStage() {}, setStep() {}, setItem() {}, setLoaded() {}, setRecipeUses() {},
+  }, indexedRecipeUses);
   const indexedAt = performance.now();
   const manifest = await writeCatalog(store, result.items, result.atlases, {
-    tooltipShortcuts: result.tooltipShortcuts, recipeItemIcons: result.recipeItemIcons,
+    tooltipShortcuts: result.tooltipShortcuts, ...result.previewIndexes,
   }, {
     pages: new Set(), lookup: new Set(), search: new Set(),
   });
   return {
-    manifest, items: result.items, atlasMs: result.atlasMs, zipReadMs: result.archiveStats.zipReadMs,
+    manifest, atlasMs: result.atlasMs, zipReadMs: result.archiveStats.zipReadMs,
     processingMs: indexedAt - started, indexingMs: performance.now() - indexedAt,
   };
 }

@@ -11,10 +11,14 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { type Instance } from '../server/instances.mts';
 import { attachLiveUpdates } from '../server/liveUpdates.mts';
 import { createOnlinePlayers } from '../server/onlinePlayers.mts';
+import { createPlayerStats } from '../server/playerStats.mts';
+import { createPlayerSkins } from '../server/playerSkins.mts';
+import { createPlayerRoster } from '../server/playerRoster.mts';
 import { createServerDirectory } from '../server/serverDirectory.mts';
 import { applyDirectoryPatch, directorySubscription } from '../src/directoryUpdates.mts';
 import type { LiveUpdate } from '../src/liveUpdates.mts';
 import type { ServerSummary } from '../src/serverDirectoryTypes.ts';
+import { offlinePlayers, readOnlinePlayersState } from '../src/onlinePlayers.mts';
 
 const token = 'test_'.repeat(10);
 const tokenEnv = 'CAPYCRAFT_TEST_ROSTER_TOKEN';
@@ -80,6 +84,114 @@ test('REST refreshes on demand, validates listed rows and clears the roster when
   await until(() => statuses.includes('restricted'), 'HTTP interval should publish restricted', 7_000);
   assert.equal(await online.lists('rest', 'Listed'), false);
   assert.equal(requests, 2);
+});
+
+test('merges known names with stored stats and excludes currently listed players', () => {
+  const saved = { name: 'Builder', playTimeMinutes: 91, lastSeenAt: 15 };
+  assert.deepEqual(offlinePlayers([{ name: 'Explorer', pingMillis: 8 }],
+    ['zebra', 'explorer', 'builder'], [saved, { name: 'EXPLORER', playTimeMinutes: 2 }], 'en'),
+  [saved, { name: 'zebra' }]);
+});
+
+test('imports saved offline time on servers with no live roster or online players', async t => {
+  const uuid = '12345678-1234-1234-1234-123456789abc';
+  const webcraft = createServer((request, response) => {
+    assert.equal(request.url, '/api/v1/internal/players/all');
+    response.end(JSON.stringify({ players: [{ uuid, name: 'Builder', playTimeMinutes: 42 }] }));
+  });
+  const origin = await listen(webcraft);
+  const configured = instance('saved', origin);
+  configured.webcraft!.playerRoster = true;
+  const instances = new Map([['saved', configured]]);
+  const database = new DatabaseSync(':memory:');
+  database.exec('CREATE TABLE players (uuid TEXT, name TEXT, last_seen_at INTEGER);'
+    + 'CREATE TABLE server_players (server TEXT, uuid TEXT, name TEXT, last_seen_at INTEGER);');
+  const stats = createPlayerStats(database);
+  const roster = createPlayerRoster(database, instances, stats);
+  const online = createOnlinePlayers(instances, stats);
+  t.after(() => { online.stop(); database.close(); webcraft.close(); });
+  const updates: unknown[] = [];
+  online.subscribe('saved', state => updates.push(state));
+  await roster.sync();
+  online.refreshHistory();
+  const expected = { status: 'disabled', previousPlayers: [{ name: 'Builder', playTimeMinutes: 42 }] };
+  assert.deepEqual(readOnlinePlayersState(await online.get('saved')), expected);
+  assert.deepEqual(readOnlinePlayersState(updates.at(-1)), expected);
+  assert.deepEqual(await roster.getNames('saved'), ['Builder']);
+});
+
+test('retains a Creative observation when the player changes mode', () => {
+  const database = new DatabaseSync(':memory:');
+  try {
+    const stats = createPlayerStats(database);
+    const row = { name: 'Builder', pingMillis: 5, playTimeMinutes: 42 };
+    const source = { players: [{ uuid: '12345678-1234-1234-1234-123456789abc' }] };
+    stats.collect('saved', source, [{ ...row, gameMode: 'creative', operator: true }]);
+    stats.collect('saved', source, [{ ...row, gameMode: 'survival', operator: false }]);
+    const [player] = stats.list('saved');
+    assert.equal(player.gameMode, 'survival');
+    assert.equal(player.operator, false);
+    assert.equal(player.seenCreative, true);
+  } finally {
+    database.close();
+  }
+});
+
+test('coalesces skin downloads and serves the disk cache after reopening SQLite', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'capycraft-skins-'));
+  const path = join(directory, 'players.sqlite');
+  let database = new DatabaseSync(path);
+  t.after(async () => { database.close(); await rm(directory, { recursive: true, force: true }); });
+  const skin = { bytes: Buffer.from([1, 2, 3]), hash: 'texture', model: 'classic' as const };
+  let downloads = 0;
+  const getSkin = createPlayerSkins(database, async () => { downloads++; return skin; });
+  assert.deepEqual(await Promise.all([getSkin('Builder'), getSkin('builder')]), [skin, skin]);
+  assert.equal(downloads, 1);
+  database.close();
+  database = new DatabaseSync(path);
+  const reopened = createPlayerSkins(database, async () => assert.fail('fresh skin should come from SQLite'));
+  assert.deepEqual(Buffer.from((await reopened('Builder')).bytes), skin.bytes);
+});
+
+test('collects play time without viewers and retains it after logout and an API restart', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'capycraft-player-stats-'));
+  const path = join(directory, 'players.sqlite');
+  const uuid = '12345678-1234-1234-1234-123456789abc';
+  let players = [{ name: 'Listed', pingMillis: 36, maxHealth: 27.5, playTimeMinutes: 125, uuid }];
+  const webcraft = createServer((_request, response) => response.end(JSON.stringify({ players })));
+  const origin = await listen(webcraft);
+  const instances = new Map([['stats', instance('stats', origin, 'http')]]);
+  let database = new DatabaseSync(path);
+  let stats = createPlayerStats(database);
+  let online = createOnlinePlayers(instances, stats);
+  t.after(async () => {
+    online.stop();
+    database.close();
+    webcraft.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const player = { name: 'Listed', playTimeMinutes: 125 };
+  await until(() => stats.list('stats').length, 'background collection should save the player');
+  assert.deepEqual(readOnlinePlayersState(await online.get('stats')), {
+    status: 'ready', players: [{ ...player, pingMillis: 36, maxHealth: 27.5 }],
+  });
+  players = [];
+  const afterLogout = await until(async () => {
+    const state = await online.get('stats');
+    return state.previousPlayers?.length ? state : undefined;
+  }, 'logged-out player should move into history', 7_000);
+  const lastSeenAt = afterLogout.previousPlayers?.[0]?.lastSeenAt;
+  assert.ok(lastSeenAt && lastSeenAt <= Date.now());
+  assert.deepEqual(readOnlinePlayersState(afterLogout), {
+    status: 'ready', players: [], previousPlayers: [{ ...player, lastSeenAt }],
+  });
+  online.stop();
+  database.close();
+  database = new DatabaseSync(path);
+  stats = createPlayerStats(database);
+  online = createOnlinePlayers(instances, stats);
+  assert.deepEqual(await online.get('stats'), afterLogout);
+  assert.deepEqual(stats.list('another-server'), []);
 });
 
 test('WebSocket sends live snapshots, scopes subscriptions and keeps catalog updates on the same connection', async t => {
@@ -194,7 +306,7 @@ test('the directory survives an initial refusal, rejected subscription and a res
           else if (infoCommands === 2) send(client, cmd.id, 'response', 503, { error: 'server_busy' });
           else {
             const body = starting ? { error: 'server_unavailable' }
-              : { serverName: 'New world', worldAgeMinutes: 5, worldAgeDays: 0 };
+              : { serverName: 'New world', worldAgeMinutes: 5, worldAgeDays: 0, worldGameTimeTicks: 6_000 };
             send(client, cmd.id, 'snapshot', starting ? 503 : 200, body);
           }
         }
@@ -251,13 +363,18 @@ test('the directory survives an initial refusal, rejected subscription and a res
   for (const client of ws.clients) {
     client.send(JSON.stringify({ id: 'server-status', type: 'patch', patch: { set: { status: 'ready' }, remove: [] } }));
     send(client, 'server-info', 'update', 200, {
-      serverName: 'New world', worldAgeMinutes: 5 * 1440, worldAgeDays: 5, motd: 'Old MOTD',
+      serverName: 'New world', worldAgeMinutes: 5 * 1440, worldAgeDays: 5, worldGameTimeTicks: 24_123, motd: 'Old MOTD',
       uptimeSeconds: 180, totalUptimeSeconds: fourDays,
+      performance: { tps: 19.98, mspt: 23.45, msptP95: 48.72 },
     });
   }
   await until(async () => (await current()).worldAgeMinutes === 5 * 1440, 'ready projection uses precise age');
+  assert.equal((await current()).worldGameTimeTicks, 24_123);
   assert.equal((await current()).totalUptimeSeconds, fourDays);
   assert.equal((await current()).uptimeSeconds, 180);
+  const performance = { tps: 19.98, mspt: 23.45, msptP95: 48.72 };
+  assert.deepEqual((await current()).performance, performance);
+  await until(() => delivered?.[0]?.performance?.msptP95 === 48.72, 'browser receives performance decimals');
   for (const client of ws.clients) {
     client.send(JSON.stringify({
       id: 'server-info', type: 'patch', patch: { set: { uptimeSeconds: 240, worldAgeDays: null }, remove: ['motd'] },
@@ -270,15 +387,24 @@ test('the directory survives an initial refusal, rejected subscription and a res
     && (await current()).worldAgeDays === undefined,
     'upstream applies consecutive patches including a null field and its removal');
   assert.equal((await current()).motd, undefined);
+  assert.deepEqual((await current()).performance, performance);
   for (const client of ws.clients) client.terminate();
   await new Promise<void>(resolve => upstream.close(() => resolve()));
   await until(async () => (await current()).status === 'offline', 'loss of the active WebCraft connection');
   assert.equal((await current()).worldAgeMinutes, 5 * 1440);
   assert.equal((await current()).totalUptimeSeconds, fourDays);
   assert.equal((await current()).uptimeSeconds, undefined);
+  assert.equal((await current()).playersOnline, undefined);
+  assert.equal((await current()).performance, undefined);
+  await until(() => delivered?.[0]?.status === 'offline' && delivered[0].performance === undefined,
+    'browser removes offline performance');
+  assert.equal((await current()).lastKnownPlayersOnline, 3);
   const cached = (await createServerDirectory(database, instances, () => false, new Map()).snapshot())[0];
   assert.equal(cached.worldAgeMinutes, 5 * 1440);
+  assert.equal(cached.worldGameTimeTicks, 24_123);
+  assert.equal(cached.performance, undefined);
   assert.equal(cached.totalUptimeSeconds, fourDays);
+  assert.equal(cached.lastKnownPlayersOnline, 3);
   starting = true;
   upstream.listen(port, '127.0.0.1');
   await once(upstream, 'listening');
@@ -293,6 +419,7 @@ test('the directory survives an initial refusal, rejected subscription and a res
   }
   await until(async () => (await current()).worldAgeDays === 1, 'legacy days update on the new socket');
   assert.equal((await current()).worldAgeMinutes, undefined);
+  assert.equal((await current()).worldGameTimeTicks, undefined);
   await until(() => delivered?.[0]?.name === 'Legacy feed' && delivered[0].status === 'ready',
     'browser stayed subscribed and received the new ready state');
 });
@@ -300,7 +427,8 @@ test('the directory survives an initial refusal, rejected subscription and a res
 test('the browser opts in to one full directory and receives small per-instance patches afterward', async t => {
   const icon = 'data:image/png;base64,' + 'x'.repeat(6000);
   let servers: ServerSummary[] = [
-    { alias: 'old', status: 'ready', tabs: [], logo: icon, uptimeSeconds: 60, playersOnline: 1, lastSeenAt: 100 },
+    { alias: 'old', status: 'ready', tabs: [], logo: icon, uptimeSeconds: 60, worldGameTimeTicks: 24_000,
+      playersOnline: 1, lastSeenAt: 100 },
     { alias: 'remove', status: 'waiting', tabs: [] },
   ];
   const api = createServer();
@@ -336,17 +464,17 @@ test('the browser opts in to one full directory and receives small per-instance 
   await wait(50);
   assert.equal(frames.length, 1);
 
-  servers = [{ ...servers[0], uptimeSeconds: 62, lastSeenAt: 123 }, servers[1]];
+  servers = [{ ...servers[0], uptimeSeconds: 62, worldGameTimeTicks: 24_040, lastSeenAt: 123 }, servers[1]];
   live.refreshDirectory();
   await wait(50);
   assert.equal(frames.length, 1);
   assert.deepEqual(await fetch(site).then(response => response.json()), { servers });
 
-  servers = [{ ...servers[0], uptimeSeconds: 120, lastSeenAt: 158 }, servers[1]];
+  servers = [{ ...servers[0], uptimeSeconds: 120, worldGameTimeTicks: 26_400, lastSeenAt: 158 }, servers[1]];
   live.refreshDirectory();
   await until(() => frames.length === 2, 'minute boundary produces a patch');
   assert.deepEqual(frames[1], { type: 'servers-patch', added: [], removed: [], changed: [
-    { alias: 'old', set: { uptimeSeconds: 120, lastSeenAt: 158 }, remove: [] },
+    { alias: 'old', set: { uptimeSeconds: 120, worldGameTimeTicks: 26_400, lastSeenAt: 158 }, remove: [] },
   ] });
   assert.ok(JSON.stringify(frames[1]).length < 200);
   const minute = applyDirectoryPatch(initial.servers, frames[1])!;

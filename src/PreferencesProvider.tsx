@@ -1,8 +1,6 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
-import { defaultPreferences, dyeColors, isLanguage, readButtonColor, translations, type Preferences } from './preferences';
+import { defaultPreferences, dyeColors, isLanguage, preferencesStorageKey, readButtonColor, translations, type Preferences } from './preferences';
 import './styles/theme.css';
-
-const defaultStorageKey = 'capycraft.preferences';
 
 type PreferenceContext = Preferences & {
   update: (patch: Partial<Preferences>) => void;
@@ -10,33 +8,37 @@ type PreferenceContext = Preferences & {
 
 const preferenceContext = createContext<PreferenceContext | null>(null);
 
-function readPreferences(storageKey: string): Preferences {
+function readPreferences(storageKey: string, addressWindow: Window): Preferences {
+  const urlLanguage = storageKey === preferencesStorageKey
+    ? new URLSearchParams(addressWindow.location.search).get('lang')
+    : null;
   try {
     const saved = JSON.parse(window.localStorage.getItem(storageKey) ?? 'null');
-    const language = saved?.language;
-    const savedModes = saved?.tooltipModes;
-    let tooltipModes = defaultPreferences.tooltipModes;
-    if (savedModes?.advanced === true) {
-      tooltipModes = { advanced: true };
-    } else if (savedModes?.advanced === false && typeof savedModes.shortcut === 'string' && savedModes.shortcut) {
-      tooltipModes = { advanced: false, shortcut: savedModes.shortcut };
-    }
-
+    const language = isLanguage(urlLanguage) ? urlLanguage : saved?.language;
     return {
       language: isLanguage(language) ? language : defaultPreferences.language,
       buttonColor: readButtonColor(saved?.buttonColor),
       introAnimation: typeof saved?.introAnimation === 'boolean' ? saved.introAnimation : defaultPreferences.introAnimation,
-      tooltipModes,
+      advancedItemTooltips: typeof saved?.advancedItemTooltips === 'boolean'
+        ? saved.advancedItemTooltips : saved?.tooltipModes?.advanced === true,
+      achievementView: saved?.achievementView === 'list' ? 'list' : defaultPreferences.achievementView,
+      questView: saved?.questView === 'board' || saved?.questView === 'list' ? saved.questView : defaultPreferences.questView,
     };
   } catch {
-    return defaultPreferences;
+    return isLanguage(urlLanguage) ? { ...defaultPreferences, language: urlLanguage } : defaultPreferences;
   }
 }
 
 export function PreferencesProvider({
-  children, storageKey = defaultStorageKey, languageOverride,
-}: { children: ReactNode; storageKey?: string; languageOverride?: Preferences['language'] }) {
-  const [preferences, setPreferences] = useState(() => readPreferences(storageKey));
+  children, storageKey = preferencesStorageKey, languageOverride, addressWindow = window, includeLanguageInAddress = false,
+}: {
+  children: ReactNode;
+  storageKey?: string;
+  languageOverride?: Preferences['language'];
+  addressWindow?: Window;
+  includeLanguageInAddress?: boolean;
+}) {
+  const [preferences, setPreferences] = useState(() => readPreferences(storageKey, addressWindow));
   const language = languageOverride ?? preferences.language;
 
   useEffect(() => {
@@ -49,11 +51,22 @@ export function PreferencesProvider({
     }
   }, [preferences, language, storageKey]);
 
+  function update(patch: Partial<Preferences>) {
+    if (patch.language && storageKey === preferencesStorageKey && !languageOverride) {
+      const url = new URL(addressWindow.location.href);
+      if (includeLanguageInAddress || url.searchParams.has('lang')) {
+        url.searchParams.set('lang', patch.language);
+        addressWindow.history.replaceState(addressWindow.history.state, '', url);
+      }
+    }
+    setPreferences(current => ({ ...current, ...patch }));
+  }
+
   return (
     <preferenceContext.Provider value={{
       ...preferences,
       language,
-      update: patch => setPreferences(current => ({ ...current, ...patch })),
+      update,
     }}>
       {children}
     </preferenceContext.Provider>

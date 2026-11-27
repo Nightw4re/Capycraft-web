@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import type { Page } from '../navigation';
+import type { Page, PlayerProfileTab } from '../navigation';
 import { usePreferences } from '../PreferencesProvider';
 import { animatePageArrival } from './pageMotion';
 import { SceneHeader } from './SceneHeader';
@@ -16,6 +16,7 @@ type SceneEntranceProps = {
   onNavigateHome?: () => void;
   page?: Page;
   server?: string;
+  playerProfile?: { name: string; tab: PlayerProfileTab };
   onClearServer?: () => void;
 };
 
@@ -25,7 +26,18 @@ export function useSceneContentReady() {
   return useContext(sceneContentReadyContext);
 }
 
-export function SceneEntrance({ animate = true, children, onNavigateHome, page, server, onClearServer }: SceneEntranceProps) {
+export function SceneEntrance({ animate = true, children, onNavigateHome, page, server, playerProfile, onClearServer }: SceneEntranceProps) {
+  return <SceneEntranceLayout animate={animate} renderHeader={ready => (
+    <SceneHeader navigationEnabled={ready} onNavigateHome={onNavigateHome}
+      page={page} server={server} playerProfile={playerProfile} onClearServer={onClearServer} />
+  )}>{children}</SceneEntranceLayout>;
+}
+
+export function SceneEntranceLayout({ animate, children, renderHeader }: {
+  animate: boolean;
+  children?: ReactNode;
+  renderHeader: (ready: boolean) => ReactNode;
+}) {
   const { text, introAnimation } = usePreferences();
   const sceneRef = useRef<HTMLDivElement>(null);
   const [playOnLoad] = useState(introAnimation);
@@ -150,8 +162,7 @@ export function SceneEntrance({ animate = true, children, onNavigateHome, page, 
           if (animationName === 'focus-scene' && target === currentTarget) setIntro({ phase: 'complete' });
         }}
       >
-        <SceneHeader navigationEnabled={introPhase === 'complete'} onNavigateHome={onNavigateHome}
-          page={page} server={server} onClearServer={onClearServer} />
+        {renderHeader(introPhase === 'complete')}
         <sceneContentReadyContext.Provider value={!animate || (introPhase === 'complete' && pageArrived)}>
           {children}
         </sceneContentReadyContext.Provider>

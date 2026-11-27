@@ -1,0 +1,19 @@
+# Generated outputs and local configuration.
+.local-artifacts/
+.agents/
+.codex/
+assets/
+node_modules/
+package-lock.json
+dist/
+build/
+storybook-static/
+graphify-out/
+__pycache__/
+.env*
+*.log
+data/
+webcraft-exports/
+public/item-catalog/
+references/
+test-results/

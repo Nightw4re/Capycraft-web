@@ -2,14 +2,34 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { basename, dirname, resolve } from 'node:path';
+import sharp from 'sharp';
 import layout from '../src/items/catalogLayout.json' with { type: 'json' };
+import { parseAtlasIcon } from '../src/items/previewAtlas.mts';
 import { defaultAlias } from '../src/minecraftServers.mjs';
 import { catalogPublishedAt, catalogPublishedAtHeader, readCatalogAsset } from './catalogAssets.mts';
 
 export const catalogPrefix = '/item-catalog/';
 const catalogAsset = /^(?:revisions\/[a-f0-9]{64}\/)?(?:(?:icons|atlases)\/[a-f0-9]{64}\.(?:png|webp)|(?:details|pages|lookup|payloads)\/[a-f0-9]{64}\.json)$/;
+const revisionIcon = /^revisions\/([a-f0-9]{64})\/icons\/([^/]+)$/;
 
-export function readCatalogResource(directory: string, path: string) {
+function atlasTile(path: string) {
+  const match = revisionIcon.exec(path);
+  const sprite = match && parseAtlasIcon(match[2]);
+  if (sprite) return { revision: match[1], ...sprite };
+}
+
+export async function readCatalogResource(directory: string, path: string) {
+  const tile = atlasTile(path);
+  if (tile) {
+    const image = await readCatalogAsset(resolve(directory, 'revisions', tile.revision), 'atlases', `${tile.atlas}.webp`);
+    const size = layout.tileSize;
+    return sharp(image).extract({
+      left: (tile.position % layout.atlasColumns) * size,
+      top: Math.floor(tile.position / layout.atlasColumns) * size,
+      width: size,
+      height: size,
+    }).webp({ lossless: true }).toBuffer();
+  }
   const resource = resolve(directory, path);
   if (path === 'catalog.json' || path === layout.statusFile) return readFile(resource);
   const folder = dirname(resource);
@@ -23,7 +43,7 @@ export async function serveCatalog(directories: ReadonlyMap<string, string>, pat
   path = scoped?.[2] ?? path;
   const manifest = path === 'catalog.json';
   const status = path === layout.statusFile;
-  if (!directory || (scoped && alias === defaultAlias) || (!manifest && !status && !catalogAsset.test(path))) {
+  if (!directory || (scoped && alias === defaultAlias) || (!manifest && !status && !catalogAsset.test(path) && !atlasTile(path))) {
     response.writeHead(404).end();
     return;
   }

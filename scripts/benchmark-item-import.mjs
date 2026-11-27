@@ -12,14 +12,11 @@ if (!archive || !Number.isSafeInteger(repetitions) || repetitions < 1) {
 }
 
 const modes = [
-  { name: 'File storage with atlases', useAtlases: true, createStore: createFileStore },
-  { name: 'File storage with direct icons', useAtlases: false, createStore: createFileStore },
-  { name: 'SQLite with atlases', useAtlases: true, createStore: createCatalogDatabase },
-  { name: 'SQLite with direct icons', useAtlases: false, createStore: createCatalogDatabase },
+  { name: 'File storage', createStore: createFileStore },
+  { name: 'SQLite', createStore: createCatalogDatabase, indexedRecipeUses: true },
 ];
 const measurements = modes.map(() => []);
-let expectedItems;
-const expectedManifests = new Map();
+let expectedManifest;
 
 for (let run = 0; run < repetitions; run++) {
   // Rotate the run order so the same mode isn't always first on a warming filesystem cache.
@@ -34,7 +31,6 @@ for (let run = 0; run < repetitions; run++) {
       let writeMs = 0;
       let entries = 0;
       const timedStore = {
-        read: store.read,
         async write(...args) {
           const start = performance.now();
           await store.write(...args);
@@ -42,15 +38,12 @@ for (let run = 0; run < repetitions; run++) {
           entries++;
         },
       };
-      const result = await benchmarkCatalogImport(resolve(archive), timedStore, mode.useAtlases);
+      const result = await benchmarkCatalogImport(resolve(archive), timedStore, mode.indexedRecipeUses);
       const commitStarted = performance.now();
       store.finish?.();
       const finished = performance.now();
-      const items = result.items.map(({ sprite, ...item }) => item);
-      expectedItems ??= items;
-      assert.deepEqual(items, expectedItems);
-      if (!expectedManifests.has(mode.useAtlases)) expectedManifests.set(mode.useAtlases, result.manifest);
-      assert.deepEqual(result.manifest, expectedManifests.get(mode.useAtlases));
+      expectedManifest ??= result.manifest;
+      assert.deepEqual(result.manifest, expectedManifest);
       measurements[index].push({
         totalMs: finished - started,
         atlasMs: result.atlasMs,
@@ -75,7 +68,7 @@ function median(values) {
 }
 
 console.log(JSON.stringify({
-  items: expectedItems.length,
+  items: expectedManifest.total,
   repetitions,
   modes: modes.map(({ name }, index) => {
     const runs = measurements[index];

@@ -9,7 +9,21 @@ import { test } from 'node:test';
 import { createAchievements } from '../server/achievements.mts';
 import type { Instance } from '../server/instances.mts';
 import { createPlayerRoster } from '../server/playerRoster.mts';
+import { createProgressCache } from '../server/progressCache.mts';
 import { routeFromUrl, serverPath } from '../src/navigation.ts';
+import { readAchievementCatalog } from '../src/achievements.mts';
+import { layoutProgress } from '../src/progressLayout.mts';
+
+test('the advancement board uses the server tree positions and parent IDs', () => {
+  const root = { id: 'demo:root', title: 'Root', description: '', frame: 'task', x: 0, y: 0 };
+  const next = { id: 'demo:next', title: 'Next', description: '', frame: 'goal', x: 1, y: 1.5, parentId: root.id };
+  const catalog = readAchievementCatalog({ total: 2, advancements: [root, next] });
+  assert.ok(catalog);
+  assert.deepEqual(readAchievementCatalog(catalog), catalog);
+  const layout = layoutProgress(catalog.advancements);
+  assert.deepEqual(layout.edges.map(edge => [edge.source.entry.id, edge.target.entry.id]), [[root.id, next.id]]);
+  assert.ok(layout.nodes[0].x < layout.nodes[1].x && layout.nodes[0].y < layout.nodes[1].y);
+});
 
 const tokenEnv = 'CAPYCRAFT_ACHIEVEMENTS_FIXTURE_TOKEN';
 const token = 'capycraft_fixture_'.repeat(3);
@@ -69,7 +83,8 @@ test('persistent roster merges dated history and deduplicates names without publ
 });
 
 test('Achievements proxies only opted-in catalogs and listed player progress, and strips private fields', async t => {
-  const item = { id: 'minecraft:story/stone', title: 'Stone Age', description: 'Mine stone', frame: 'task' };
+  const item = { id: 'minecraft:story/stone', title: 'Stone Age', description: 'Mine stone', frame: 'task',
+    group: 'minecraft:story/root', groupTitle: 'Minecraft', iconItemId: 'minecraft:cobblestone' };
   let requests = 0;
   let upstreamStatus = 200;
   let upstreamError = 'advancement_progress_unavailable';
@@ -98,11 +113,17 @@ test('Achievements proxies only opted-in catalogs and listed player progress, an
     origin: `http://127.0.0.1:${address.port}`, tokenEnv, achievements: true,
     directoryTransport: 'http', info: 'public', status: 'public', playerHistory: false,
   } };
-  const serve = createAchievements(new Map([['alpha', instance], ['beta', { ...instance, tabs: ['players'] }]]), async () => ['Visitor']);
+  const db = new DatabaseSync(':memory:');
+  const cache = createProgressCache(db, async () => 'fixture');
+  const { id: legacyId, title, description, frame } = item;
+  (await cache('alpha', 'achievements', null)).save({
+    total: 1, advancements: [{ id: legacyId, title, description, frame }],
+  });
+  const serve = createAchievements(new Map([['alpha', instance], ['beta', { ...instance, tabs: ['players'] }]]), async () => ['Visitor'], cache);
   const api = createServer(serve);
   api.listen(0, '127.0.0.1');
   await once(api, 'listening');
-  t.after(() => { api.close(); upstream.close(); });
+  t.after(() => { api.close(); upstream.close(); db.close(); });
   const apiAddress = api.address();
   assert.ok(apiAddress && typeof apiAddress === 'object');
   const endpoint = `http://127.0.0.1:${apiAddress.port}/api/achievements`;
@@ -115,6 +136,8 @@ test('Achievements proxies only opted-in catalogs and listed player progress, an
   const catalog = await fetch(`${endpoint}?server=alpha`);
   assert.equal(catalog.headers.get('cache-control'), 'no-store');
   assert.deepEqual(await catalog.json(), { total: 1, advancements: [item] });
+  assert.deepEqual(await fetch(`${endpoint}?server=alpha`).then(response => response.json()), { total: 1, advancements: [item] });
+  assert.equal(requests, 1);
   assert.deepEqual(await fetch(`${endpoint}?server=alpha&player=visitor`).then(response => response.json()), {
     total: 1, advancements: [item], player: 'Visitor', completed: 1, completedIds: [item.id],
   });
@@ -123,7 +146,9 @@ test('Achievements proxies only opted-in catalogs and listed player progress, an
   assert.deepEqual(await fetch(`${endpoint}?server=alpha&player=visitor`).then(response => response.json()), { error: 'player_not_found' });
   upstreamStatus = 503;
   assert.equal((await fetch(`${endpoint}?server=alpha&player=visitor`)).status, 503);
+  db.prepare('UPDATE progress_cache SET saved_at = 0').run();
+  assert.deepEqual(await fetch(`${endpoint}?server=alpha`).then(response => response.json()), { total: 1, advancements: [item] });
   upstreamStatus = 401;
   assert.equal((await fetch(`${endpoint}?server=alpha`)).status, 403);
-  assert.equal(requests, 5);
+  assert.equal(requests, 6);
 });

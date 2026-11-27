@@ -4,6 +4,7 @@ import {
   type ItemBar, type TooltipShortcut,
 } from './catalogIndex.mjs';
 import { isItemId } from './itemRoutes.mts';
+import { isPreviewIconName, parseAtlasIcon } from './previewAtlas.mts';
 import { catalogSubdirectory } from '../minecraftServers.mjs';
 import type { Language } from '../preferences';
 
@@ -39,6 +40,7 @@ export type Catalog = {
   getItem(id: string, signal: AbortSignal): Promise<CatalogItem | undefined>;
   getItems(ids: ReadonlySet<string>, signal: AbortSignal): Promise<ReadonlyMap<string, CatalogItem>>;
   getRecipeItemIcons?(ids: ReadonlySet<string>, signal: AbortSignal): Promise<ReadonlyMap<string, string>>;
+  getAdvancementIcons?(signal: AbortSignal): Promise<ReadonlyMap<string, string>>;
   getIcon?(name: string): string | undefined;
   getRecipeUses?(id: string, signal: AbortSignal, kind?: 'fluid'): Promise<{ feed: unknown; publishedAt?: number }>;
 };
@@ -71,7 +73,6 @@ type ItemDetails = {
 const directory = `${import.meta.env.BASE_URL}item-catalog/`;
 const catalogDirectory = (server: string) => directory + catalogSubdirectory(server);
 const resource = /^[a-f0-9]{64}$/;
-const imageName = /^[a-f0-9]{64}\.(?:webp|png)$/;
 const itemDetails = new Map<string, Promise<ItemDetails>>();
 
 export { isItemId };
@@ -94,11 +95,18 @@ function isPayloads(value: unknown): value is ItemPayloads {
 }
 
 function isIcon(value: unknown, version: number): value is string {
-  return typeof value === 'string' && (version === 1 ? resource : imageName).test(value);
+  return typeof value === 'string' && (version === 1 ? resource.test(value) : isPreviewIconName(value));
 }
 
 function iconUrl(root: string, icon: string, version: number) {
   return `${root}icons/${version === 1 ? `${icon}.png` : icon}`;
+}
+
+export function spriteForIcon(url: string | undefined): ItemSprite | undefined {
+  if (!url?.startsWith(directory)) return;
+  const match = /\/icons\/([^/]+)$/.exec(url);
+  const sprite = match && parseAtlasIcon(match[1]);
+  if (sprite) return { url: `${url.slice(0, match.index)}/atlases/${sprite.atlas}.webp`, position: sprite.position };
 }
 
 function isCatalogItem(value: unknown, version: number, atlasCount: number): value is CatalogRecord {
@@ -136,15 +144,15 @@ function readRecords(data: unknown, version: number, atlases: string[], root = d
   if (!Array.isArray(data) || !data.every((item): item is CatalogRecord => isCatalogItem(item, version, atlases.length))) {
     throw new Error('Invalid catalog records.');
   }
-  return data.map(({ icon, sprite, detail, ...item }) => ({
-    ...item,
-    icon: icon === undefined ? undefined : iconUrl(root, icon, version),
-    detail: detail === undefined ? undefined : `${root}details/${detail}.json`,
-    sprite: version !== 1 && sprite !== undefined ? {
+  return data.map(({ icon, sprite, detail, ...item }) => {
+    const url = icon === undefined ? undefined : iconUrl(root, icon, version);
+    const legacySprite = version !== 1 && sprite !== undefined ? {
       url: `${root}atlases/${atlases[Math.floor(sprite / layout.pageSize)]}.webp`,
       position: sprite % layout.pageSize,
-    } : undefined,
-  }));
+    } : undefined;
+    return { ...item, icon: url, sprite: spriteForIcon(url) ?? legacySprite,
+      detail: detail === undefined ? undefined : `${root}details/${detail}.json` };
+  });
 }
 
 function legacyCatalog(items: CatalogItem[]): Catalog {
@@ -199,7 +207,7 @@ function recipePublishedAt(response: Response) {
 }
 
 function pagedCatalog(data: Record<string, unknown>, atlases: string[], server: string, publishedAt?: number): Catalog {
-  const { total, pages, lookup, mods, search, revision, state, expected, tooltipShortcuts, recipeItemIcons } = data;
+  const { total, pages, lookup, mods, search, revision, state, expected, tooltipShortcuts, recipeItemIcons, advancementIcons } = data;
   if (typeof total !== 'number' || !Number.isSafeInteger(total) || total < 0 || !isResource(search) || !isResource(revision)
     || (state !== 'ready' && state !== 'importing' && state !== 'failed')
     || typeof expected !== 'number' || !Number.isSafeInteger(expected) || expected < total
@@ -213,8 +221,21 @@ function pagedCatalog(data: Record<string, unknown>, atlases: string[], server: 
   const pageIds = { cs: pages.cs, en: pages.en };
   const root = `${catalogDirectory(server)}revisions/${revision}/`;
   const ingredientIconIndex = isResource(recipeItemIcons) ? `${root}payloads/${recipeItemIcons}.json` : undefined;
+  const advancementIconIndex = isResource(advancementIcons) ? `${root}payloads/${advancementIcons}.json` : undefined;
   const lookupItems = async (hash: string, signal: AbortSignal) =>
     readRecords(await readJson(`${root}lookup/${hash}.json`, signal), layout.version, atlases, root);
+  async function readIcons(index: string, signal: AbortSignal, ids?: ReadonlySet<string>) {
+    const data = await readJson(index, signal);
+    const icons = new Map<string, string>();
+    if (!isRecord(data)) return icons;
+    for (const id of ids ?? Object.keys(data)) {
+      const name = data[id];
+      if (isItemId(id) && Object.hasOwn(data, id) && isIcon(name, layout.version)) {
+        icons.set(id, iconUrl(root, name, layout.version));
+      }
+    }
+    return icons;
+  }
   return {
     key: `${revision}:${state}:${search}:${atlases.length}`,
     revision,
@@ -222,11 +243,12 @@ function pagedCatalog(data: Record<string, unknown>, atlases: string[], server: 
     progress: state === 'ready' ? undefined : { loaded: total, expected, failed: state === 'failed' },
     mods,
     tooltipShortcuts,
-    getIcon: name => imageName.test(name) ? iconUrl(root, name, layout.version) : undefined,
+    getIcon: name => isPreviewIconName(name) ? iconUrl(root, name, layout.version) : undefined,
     async getPage({ language, page, query }, signal) {
+      const catalogLanguage = language === 'cs' ? 'cs' : 'en';
       if (query.trim()) {
         const mod = exactCatalogMod(mods, catalogSearchTerms(query).mods);
-        const parameters = new URLSearchParams({ server, revision, index: search, language, page: String(page),
+        const parameters = new URLSearchParams({ server, revision, index: search, language: catalogLanguage, page: String(page),
           q: mod ? catalogSearchWithMod(query, '') : query, mod: mod ?? '' });
         const data = await readJson(`/api/item-search?${parameters}`, signal);
         if (!isRecord(data) || typeof data.total !== 'number' || !Number.isSafeInteger(data.total) || data.total < 0) {
@@ -234,7 +256,7 @@ function pagedCatalog(data: Record<string, unknown>, atlases: string[], server: 
         }
         return { items: readRecords(data.items, layout.version, atlases, root), total: data.total };
       }
-      const hash = pageIds[language][page];
+      const hash = pageIds[catalogLanguage][page];
       const items = hash ? readRecords(await readJson(`${root}pages/${hash}.json`, signal), layout.version, atlases, root) : [];
       return { items, total };
     },
@@ -257,18 +279,8 @@ function pagedCatalog(data: Record<string, unknown>, atlases: string[], server: 
       }));
       return items;
     },
-    getRecipeItemIcons: ingredientIconIndex ? async (ids, signal) => {
-      const data = await readJson(ingredientIconIndex, signal);
-      const icons = new Map<string, string>();
-      if (!isRecord(data)) return icons;
-      for (const id of ids) {
-        const name = data[id];
-        if (isItemId(id) && Object.hasOwn(data, id) && isIcon(name, layout.version)) {
-          icons.set(id, iconUrl(root, name, layout.version));
-        }
-      }
-      return icons;
-    } : undefined,
+    getRecipeItemIcons: ingredientIconIndex ? (ids, signal) => readIcons(ingredientIconIndex, signal, ids) : undefined,
+    getAdvancementIcons: advancementIconIndex ? signal => readIcons(advancementIconIndex, signal) : undefined,
     getRecipeUses: state === 'ready' ? async (id, signal, kind) => {
       const parameters = new URLSearchParams({ server, revision, id });
       if (kind) parameters.set('kind', kind);

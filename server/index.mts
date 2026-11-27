@@ -2,6 +2,8 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { createServer, type ServerResponse } from 'node:http';
+import { accountPath } from '../src/auth/account.mts';
+import { createAccountApi } from './accounts.mts';
 import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createServerItemSearch, itemSearchPath } from './itemSearch.mts';
@@ -12,14 +14,18 @@ import { createItemPages } from './itemPages.mts';
 import { createServerDirectory, serverDirectoryPath } from './serverDirectory.mts';
 import { attachLiveUpdates } from './liveUpdates.mts';
 import { defaultAlias } from '../src/minecraftServers.mjs';
-import { downloadMinecraftSkin } from './minecraftSkin.mts';
+import { createPlayerSkins } from './playerSkins.mts';
+import { createLocalEquipment } from './localEquipment.mts';
+import { createProgressCache } from './progressCache.mts';
 import { createOnlinePlayers } from './onlinePlayers.mts';
+import { createPlayerStats } from './playerStats.mts';
 import { achievementsPath } from '../src/achievements.mts';
 import { createAchievements } from './achievements.mts';
 import { questsPath } from '../src/quests.mts';
 import { createQuests } from './quests.mts';
 import { ponderPath } from '../src/ponder/format.mts';
 import { createPonder } from './ponder.mts';
+import { ponderStorage } from './ponderStorage.mts';
 import { createPlayerRoster, playerNamePattern, uuidPattern } from './playerRoster.mts';
 
 const pollIntervalMs = 60_000;
@@ -100,10 +106,10 @@ if (!hasServerPlayers && instances.has(defaultAlias)) {
   database.prepare('INSERT INTO server_players SELECT ?, uuid, name, last_seen_at FROM players').run(defaultAlias);
 }
 database.exec('COMMIT');
-const roster = createPlayerRoster(database, instances);
-const serveAchievements = createAchievements(instances, roster.getNames);
-const serveQuests = createQuests(instances, roster.resolvePlayer);
-const servePonder = createPonder(instances);
+const playerStats = createPlayerStats(database);
+const roster = createPlayerRoster(database, instances, playerStats);
+const servePonder = createPonder(new Map([...instances.keys()].map(server =>
+  [server, ponderStorage(resolve(import.meta.dirname, '..'), server)])));
 
 const savePlayer = database.prepare(`
   INSERT INTO players (uuid, name, last_seen_at) VALUES (?, ?, ?)
@@ -128,21 +134,11 @@ const recentServerNames = database.prepare(`
   ORDER BY max(last_seen_at) DESC, name COLLATE NOCASE LIMIT 10
 `);
 const findPlayerName = database.prepare('SELECT 1 FROM players WHERE name = ? COLLATE NOCASE LIMIT 1');
-const skinCache = new Map<string, { expires: number; result: ReturnType<typeof downloadMinecraftSkin> }>();
+const getSkin = createPlayerSkins(database);
 
 async function servePlayerSkin(name: string, response: ServerResponse, online: boolean) {
-  const key = name.toLowerCase();
-  const now = Date.now();
-  let entry = skinCache.get(key);
-  if (!entry || now >= entry.expires) {
-    if (skinCache.size >= 256) skinCache.delete(skinCache.keys().next().value!);
-    const pending = { expires: now + 60 * 60_000, result: downloadMinecraftSkin(key) };
-    void pending.result.catch(() => { pending.expires = Date.now() + 60_000; });
-    skinCache.set(key, pending);
-    entry = pending;
-  }
   try {
-    const { bytes, model } = await entry.result;
+    const { bytes, model } = await getSkin(name);
     response.writeHead(200, {
       'Content-Type': 'image/png',
       'Cache-Control': online ? 'private, no-store' : 'public, max-age=3600',
@@ -190,6 +186,7 @@ async function syncPlayers() {
     }
   });
   await Promise.all([...histories, roster.sync()]);
+  onlinePlayers.refreshHistory();
   setTimeout(() => void syncPlayers(), pollIntervalMs).unref();
 }
 
@@ -212,6 +209,19 @@ function pollItemImports(server: string, inbox: string) {
 
 const catalogDirectory = resolve(process.env.CAPYCRAFT_ITEM_CATALOG_DIR || 'public/item-catalog');
 const catalogs = itemCatalogDirectories(instances, catalogDirectory);
+const progressCache = createProgressCache(database, async server => {
+  const root = catalogs.get(server);
+  const origin = instances.get(server)?.webcraft?.origin ?? '';
+  if (!root) return origin;
+  try {
+    const manifest = JSON.parse((await readCatalogResource(root, 'catalog.json')).toString());
+    return JSON.stringify([origin, manifest.revision, manifest.publishedAt]);
+  } catch {
+    return origin;
+  }
+});
+const serveAchievements = createAchievements(instances, roster.getNames, progressCache);
+const serveQuests = createQuests(instances, roster.resolvePlayer, progressCache);
 const serveItemPage = createItemPages(catalogs.keys(), (server, path) => readCatalogResource(catalogs.get(server)!, path),
   () => readFile(new URL('../dist/index.html', import.meta.url), 'utf8'));
 const searchItems = createServerItemSearch(catalogs);
@@ -220,10 +230,13 @@ const hasLegacyPlayerFeed = feeds.some(feed => feed.server === defaultAlias);
 const directory = createServerDirectory(database, instances, () =>
   hasLegacyPlayerFeed || existsSync(resolve(catalogDirectory, 'catalog.json')), catalogs,
 );
-const onlinePlayers = createOnlinePlayers(instances);
+const onlinePlayers = createOnlinePlayers(instances, playerStats);
+const equipment = createLocalEquipment(database, process.env);
+const serveAccount = createAccountApi(database, instances);
 
 const api = createServer(async (request, response) => {
   const path = request.url?.split('?', 1)[0];
+  if (path === accountPath) return void serveAccount(request, response);
   if (serveItemPage(request, response, path)) return;
   if (path === serverDirectoryPath) return void directory.serve(request, response);
   if (path === achievementsPath) return void serveAchievements(request, response);
@@ -258,6 +271,12 @@ const api = createServer(async (request, response) => {
     return;
   }
   try {
+    const equipmentView = params.get('equipment');
+    if (equipmentView && server !== null) {
+      await equipment.serve(request, response, server, instances.get(server)?.webcraft?.origin,
+        params.get('player') ?? '', equipmentView, params.get('hash'));
+      return;
+    }
     const online = params.get('online') === '1';
     if (online && server === null) {
       response.writeHead(400).end(JSON.stringify({ error: 'server_required' }));
@@ -265,7 +284,11 @@ const api = createServer(async (request, response) => {
     }
     const skin = params.get('skin');
     if (skin !== null) {
-      if (!playerNamePattern.test(skin) || !(online ? await onlinePlayers.lists(server!, skin) : findPlayerName.get(skin) || roster.knowsSkin(skin))) {
+      const profile = params.get('profile') === '1';
+      const knownName = () => findPlayerName.get(skin) || roster.knowsSkin(skin);
+      const known = playerNamePattern.test(skin) && (online ? await onlinePlayers.lists(server!, skin)
+        : knownName() || profile && (playerStats.knowsName(skin) || onlinePlayers.listsAnywhere(skin)));
+      if (!known) {
         response.writeHead(404).end(JSON.stringify({ error: 'player_not_found' }));
         return;
       }
@@ -292,6 +315,7 @@ const api = createServer(async (request, response) => {
 });
 const live = attachLiveUpdates(api, directory.snapshot, catalogs, onlinePlayers);
 api.once('close', onlinePlayers.stop);
+api.once('close', equipment.start(instances, onlinePlayers.lists));
 api.listen(8787, '127.0.0.1', () => {
   console.log('Capycraft player API listening on http://127.0.0.1:8787');
   api.once('close', directory.start(live.refreshDirectory));

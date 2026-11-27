@@ -1,46 +1,19 @@
-import type { CSSProperties } from 'react';
-import type { TooltipModes } from '../preferences';
 import { usePreferences } from '../PreferencesProvider';
 import type { TooltipShortcut } from './catalogIndex.mjs';
 
-const shortcutColors = new Map([
-  ['key.keyboard.left.control', '#5edcff'],
-  ['key.keyboard.left.control+key.keyboard.left.shift', '#f78bd6'],
-  ['key.keyboard.left.shift', '#8bee99'],
-  ['key.keyboard.left.alt', '#ff9b68'],
-  ['key.keyboard.left.alt+key.keyboard.left.control', '#ae9bff'],
-  ['key.keyboard.left.alt+key.keyboard.left.shift', '#ff868b'],
-  ['key.keyboard.left.alt+key.keyboard.left.control+key.keyboard.left.shift', '#98efdc'],
-]);
-
-export function tooltipShortcutColor(id: string) {
-  const color = shortcutColors.get(id);
-  if (color) return color;
-  let hash = 0;
-  for (const char of id) hash = (Math.imul(31, hash) + char.charCodeAt(0)) | 0;
-  return `oklch(80% 0.16 ${(hash >>> 0) % 360})`;
-}
-
-function shortcutStyle(id: string) {
-  return { '--item-shortcut-color': tooltipShortcutColor(id) } as CSSProperties;
-}
-
-export function ItemTooltipTools({ modes, onChange, shortcuts = [] }: {
-  modes: TooltipModes;
-  onChange: (modes: TooltipModes) => void;
-  shortcuts?: readonly TooltipShortcut[];
+export function ItemTooltipTools({ advanced, shortcut, shortcuts, onAdvanced, onShortcut }: {
+  advanced: boolean;
+  shortcut?: string;
+  shortcuts: readonly TooltipShortcut[];
+  onAdvanced: () => void;
+  onShortcut: (id: string) => void;
 }) {
   const { text } = usePreferences();
-
-  return (
-    <div className="item-tooltip-tools" role="group" aria-label={text.itemTooltipModes}>
-      <button type="button" className="item-action" aria-pressed={modes.advanced} title={text.itemTooltipAdvanced}
-        onClick={() => onChange({ advanced: !modes.advanced })}>F3 + H</button>
-      {shortcuts.map(({ id, label }) => (
-        <button key={id} type="button" className="item-action item-tooltip-alternative"
-          aria-pressed={modes.shortcut === id} title={label} style={shortcutStyle(id)}
-          onClick={() => onChange({ advanced: false, shortcut: modes.shortcut === id ? undefined : id })}>{label}</button>
-      ))}
-    </div>
-  );
+  return <div className="item-tooltip-modes" role="group" aria-label={text.itemTooltipModes}>
+    <button className="item-action" type="button" aria-pressed={advanced} onClick={onAdvanced}>
+      <span>{text.itemTooltipAdvanced}</span><kbd>F3 + H</kbd>
+    </button>
+    {shortcuts.map(({ id, label }) => <button className="item-action" type="button"
+      key={id} aria-pressed={shortcut === id} onClick={() => onShortcut(id)}>{label}</button>)}
+  </div>;
 }

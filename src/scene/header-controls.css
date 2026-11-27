@@ -39,8 +39,13 @@
   background: var(--button-fill);
 }
 
-.header-picker-trigger:is(:hover, [aria-expanded="true"]) {
+.header-picker-trigger:not(:disabled):is(:hover, [aria-expanded="true"]) {
   background: var(--button-hover);
+}
+
+.header-picker-trigger:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 
 .header-picker-arrow {
@@ -131,12 +136,35 @@
     #012169;
 }
 
-.header-picker[data-swatches="true"] .header-picker-options {
-  --swatch-columns: 4;
-  grid-template-columns: repeat(var(--swatch-columns), 2.75rem);
+.header-language-flag[data-flag="jp"] {
+  background: radial-gradient(circle closest-side, #bc002d 60%, transparent 62%) #fff;
+}
+
+.header-language-flag[data-flag="ua"] {
+  background: linear-gradient(#0057b7 50%, #ffd700 50%);
+}
+
+.header-language-flag[data-flag="de"] {
+  background: linear-gradient(#000 33.33%, #d00 33.33% 66.67%, #ffce00 66.67%);
+}
+
+.header-language-flag[data-flag="fr"] {
+  background: linear-gradient(90deg, #0055a4 33.33%, #fff 33.33% 66.67%, #ef4135 66.67%);
+}
+
+.header-language-flag[data-flag="es"] {
+  background: linear-gradient(#aa151b 25%, #f1bf00 25% 75%, #aa151b 75%);
+}
+
+.header-picker-options {
   max-block-size: max(3.5rem, calc(100dvh - var(--header-height) - 1rem));
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+
+.header-picker[data-swatches="true"] .header-picker-options {
+  --swatch-columns: 4;
+  grid-template-columns: repeat(var(--swatch-columns), 2.75rem);
 }
 
 .header-picker[data-swatches="true"] .header-picker-options button {
@@ -184,6 +212,26 @@
   min-inline-size: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.header-account-avatar {
+  display: grid;
+  flex: none;
+  place-items: center;
+  inline-size: 1.5rem;
+  block-size: 1.5rem;
+  overflow: hidden;
+  background: var(--panel-background-raised);
+  outline: 1px solid var(--panel-border);
+  font-family: var(--font-heading);
+  font-size: 0.75rem;
+}
+
+.header-account-avatar img {
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+  object-fit: cover;
 }
 
 .header-sign-in-trigger:is(:hover, [aria-expanded="true"]) {
@@ -249,6 +297,19 @@
 .header-account-name,
 .header-account-error {
   margin: 0 0 0.5rem;
+}
+
+.header-account-menu {
+  background: #000;
+}
+
+.header-account-actions {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.header-account-actions button {
+  white-space: normal;
 }
 
 .header-intro-switch {

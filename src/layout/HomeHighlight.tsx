@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { usePreferences } from '../PreferencesProvider';
 import { useSceneContentReady } from '../scene/SceneEntrance';
 import { homeHighlightFacts } from './homeHighlightFacts';
-import { PlayIcon } from './PlayIcon';
+import { PauseIcon, PlayIcon, StepIcon } from './PlayIcon';
 import './home-highlight.css';
 
 const reducedMotionQuery = '(prefers-reduced-motion: reduce)';
@@ -72,14 +72,10 @@ export function HomeHighlight() {
         </div>
         <div className="home-highlight-controls">
           <button type="button" aria-label={text.homeHighlightPrevious} title={text.homeHighlightPrevious} onClick={() => moveFact(-1)}>
-            <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-              <path d="M3 4h2v12H3zM17 3v14L7 10z" />
-            </svg>
+            <StepIcon direction="previous" />
           </button>
           <button type="button" aria-label={text.homeHighlightNext} title={text.homeHighlightNext} onClick={() => moveFact(1)}>
-            <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-              <path d="M15 4h2v12h-2zM3 3l10 7-10 7z" />
-            </svg>
+            <StepIcon direction="next" />
           </button>
           <button className="home-highlight-rotation" type="button" aria-label={rotationLabel} title={rotationLabel}
             data-rotating={rotationEnabled && sceneContentReady}
@@ -89,9 +85,7 @@ export function HomeHighlight() {
               <path key={position.current} className="home-highlight-progress-fill" d="M22 4H40V40H4V4Z" pathLength="100"
                 onAnimationEnd={() => setPosition(current => advanceFact(current, 1))} />
             </svg>
-            {rotationEnabled ? <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-              <path d="M5 4h3v12H5zM12 4h3v12h-3z" />
-            </svg> : <PlayIcon />}
+            {rotationEnabled ? <PauseIcon /> : <PlayIcon />}
           </button>
         </div>
       </div>

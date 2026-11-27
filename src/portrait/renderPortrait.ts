@@ -10,7 +10,7 @@ function scaleSamples([x, y, z]: Point): Point {
   return [x * samplesPerAxis, y * samplesPerAxis, z * samplesPerAxis];
 }
 
-function shade([ux, uy, uz]: Point, [vx, vy, vz]: Point): number {
+export function shade([ux, uy, uz]: Point, [vx, vy, vz]: Point): number {
   // Convert the face normal to the view coordinates used by Armor Preview's lighting.
   const nx = uy * vz - uz * vy;
   const ny = ux * vz - uz * vx;

@@ -15,10 +15,12 @@ import { achievementsPath } from './src/achievements.mts';
 import { questsPath } from './src/quests.mts';
 import { ponderPath } from './src/ponder/format.mts';
 import { catalogSubdirectory } from './src/minecraftServers.mjs';
+import { accountPath } from './src/auth/account.mts';
 
 const apiOrigin = 'http://127.0.0.1:8787';
 const apiPaths = [serverDirectoryPath, '/api/players', achievementsPath, questsPath, ponderPath, itemSearchPath, itemRecipeUsesPath];
 const proxy = {
+  [`^${accountPath}(?:\\?|$)`]: { target: apiOrigin, xfwd: true },
   [`^${liveUpdatesPath}$`]: { target: apiOrigin, ws: true },
   [catalogPrefix]: apiOrigin,
   [`^(?:${apiPaths.join('|')})(?:\\?|$)`]: apiOrigin,
@@ -29,7 +31,8 @@ export default defineConfig(({ mode }) => {
   const instancesRoot = instanceDirectory(env.CAPYCRAFT_INSTANCE_DIR, import.meta.dirname);
   const inbox = resolve(import.meta.dirname, env.CAPYCRAFT_ITEM_IMPORT_DIR?.trim() || 'data/item-imports');
   const databaseDirectory = resolve(import.meta.dirname, 'data/item-catalog-databases');
-  const privatePatterns = [inbox, instancesRoot, databaseDirectory]
+  const importLogDirectory = resolve(import.meta.dirname, 'data/item-import-logs');
+  const privatePatterns = [inbox, instancesRoot, databaseDirectory, importLogDirectory]
     .map(path => `${normalizePath(path).replace(/[[\]{}()*?!+@]/g, '\\$&')}/**`);
   const databaseFiles = ['**/*.sqlite', '**/*.sqlite-*'];
   return {
@@ -63,7 +66,7 @@ export default defineConfig(({ mode }) => {
     preview: { proxy: { ...proxy, [itemPageProxyPattern]: { target: apiOrigin, xfwd: true } } },
     build: {
       rolldownOptions: {
-        input: [resolve(import.meta.dirname, 'index.html'), resolve(import.meta.dirname, 'auth-redirect.html')],
+        input: [resolve(import.meta.dirname, 'index.html')],
       },
     },
   };

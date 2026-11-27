@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { rename, rm } from 'node:fs/promises';
+import { setImmediate } from 'node:timers/promises';
 import { gzipSync } from 'node:zlib';
 import { catalogDatabasePath, createAssetDatabase } from './catalogAssets.mts';
 import type { RecipeUsesIndex } from './recipeUsesIndex.mjs';
@@ -16,6 +17,7 @@ const responseEnd = Buffer.from(']}');
 const comma = Buffer.from(',');
 const emptyResponse = Buffer.concat([responseStart, responseEnd]);
 const largeResponseBytes = 128 * 1024;
+const indexWorkSliceMs = 100;
 
 export type StoredRecipeUses = { bytes: Buffer; gzip?: true };
 
@@ -26,24 +28,62 @@ export function recipeUsesDatabasePath(revisionRoot: string) {
 export async function writeStoredRecipeUses(
   store: { write: (folder: string, name: string, data: string | Uint8Array) => unknown },
   index: RecipeUsesIndex,
+  onProgress?: (progress: {
+    preparedRecipes: number; totalRecipes: number; indexedIngredients: number; totalIngredients: number;
+    compressedResponses: number; compressedBytes: number; elapsedMs: number;
+  }) => void,
 ) {
-  const ids = index.recipes.map(recipe => String(recipe?.id ?? ''));
-  const encoded = index.recipes.map(recipe => Buffer.from(JSON.stringify(recipe)));
+  const ingredients = Object.entries(index.ingredients);
+  const started = performance.now();
+  let yieldAt = started + indexWorkSliceMs;
+  let indexedIngredients = 0;
+  let compressedBytes = 0;
+  const ids: string[] = [];
+  const encoded: Buffer[] = [];
   const written = new Set<string>();
-  for (const [ingredient, positions] of Object.entries(index.ingredients)) {
+
+  function report() {
+    onProgress?.({
+      preparedRecipes: encoded.length, totalRecipes: index.recipes.length,
+      indexedIngredients, totalIngredients: ingredients.length, compressedResponses: written.size,
+      compressedBytes, elapsedMs: Math.round(performance.now() - started),
+    });
+  }
+
+  async function yieldIfNeeded() {
+    if (performance.now() < yieldAt) return;
+    report();
+    // SQLite writes and compression are synchronous. Let timers and pending I/O run between batches.
+    await setImmediate();
+    yieldAt = performance.now() + indexWorkSliceMs;
+  }
+
+  report();
+  for (const recipe of index.recipes) {
+    ids.push(String(recipe?.id ?? ''));
+    encoded.push(Buffer.from(JSON.stringify(recipe)));
+    await yieldIfNeeded();
+  }
+  for (const [ingredient, positions] of ingredients) {
+    await yieldIfNeeded();
     const ordered = positions.filter(position => index.recipes[position])
       .sort((a, b) => ids[a].localeCompare(ids[b]));
-    if (!ordered.length) continue;
-    const key = createHash('sha256').update(ordered.join(',')).digest('hex');
-    if (!written.has(key)) {
-      const response = recipeResponse(ordered.map(position => encoded[position]));
-      const level = response.length >= largeResponseBytes ? 6 : 1;
-      await store.write(payloads, key, gzipSync(response, { level }));
-      written.add(key);
+    if (ordered.length) {
+      const key = createHash('sha256').update(ordered.join(',')).digest('hex');
+      if (!written.has(key)) {
+        const response = recipeResponse(ordered.map(position => encoded[position]));
+        const level = response.length >= largeResponseBytes ? 6 : 1;
+        const compressed = gzipSync(response, { level });
+        await store.write(payloads, key, compressed);
+        compressedBytes += compressed.length;
+        written.add(key);
+      }
+      await store.write(responseGroups, ingredient, key);
     }
-    await store.write(responseGroups, ingredient, key);
+    indexedIngredients++;
   }
   await store.write(responseGroups, marker, '1');
+  report();
 }
 
 export async function publishRecipeUsesDatabase(revisionRoot: string, index: RecipeUsesIndex) {

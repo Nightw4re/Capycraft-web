@@ -23,11 +23,11 @@
   line-height: 1.6;
 }
 
-.info-panel-body > :first-child {
+.info-panel-body > :first-child:not(dialog) {
   margin-block-start: 0;
 }
 
-.info-panel-body > :last-child {
+.info-panel-body > :last-child:not(dialog) {
   margin-block-end: 0;
 }
 

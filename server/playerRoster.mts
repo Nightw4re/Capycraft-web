@@ -1,5 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { webcraftToken, type Instance } from './instances.mts';
+import type { createPlayerStats } from './playerStats.mts';
+import { validPlayTime } from '../src/onlinePlayers.mts';
 
 export const playerNamePattern = /^[A-Za-z0-9_]{1,16}$/;
 export const uuidPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
@@ -10,7 +12,7 @@ function readRoster(data: unknown) {
     throw new Error('Invalid WebCraft roster.');
   }
   const seen = new Set<string>();
-  const players: { uuid: string; name: string }[] = [];
+  const players: { uuid: string; name: string; playTimeMinutes?: number }[] = [];
   for (const player of data.players as unknown[]) {
     if (!player || typeof player !== 'object' || !('uuid' in player) || !('name' in player)
       || typeof player.uuid !== 'string' || !uuidPattern.test(player.uuid)
@@ -20,12 +22,16 @@ function readRoster(data: unknown) {
     const uuid = player.uuid.toLowerCase();
     if (seen.has(uuid)) throw new Error('Duplicate UUID in WebCraft roster.');
     seen.add(uuid);
-    if (player.name !== null) players.push({ uuid, name: player.name });
+    if (player.name !== null) players.push({
+      uuid, name: player.name,
+      playTimeMinutes: 'playTimeMinutes' in player && validPlayTime(player.playTimeMinutes) ? player.playTimeMinutes : undefined,
+    });
   }
   return players;
 }
 
-export function createPlayerRoster(database: DatabaseSync, instances: ReadonlyMap<string, Instance>) {
+export function createPlayerRoster(database: DatabaseSync, instances: ReadonlyMap<string, Instance>,
+  stats?: Pick<ReturnType<typeof createPlayerStats>, 'importSaved'>) {
   const feeds = Array.from(instances.values()).filter(instance => instance.webcraft?.playerRoster);
   const published = JSON.stringify(feeds.map(instance => instance.alias));
   database.exec(`CREATE TABLE IF NOT EXISTS webcraft_roster (
@@ -79,6 +85,13 @@ export function createPlayerRoster(database: DatabaseSync, instances: ReadonlyMa
       redirect: 'error', signal: AbortSignal.timeout(5_000),
     });
     if (!response.ok) {
+      if (response.status === 403) {
+        const body: { error?: unknown } | null = await response.json().catch(() => null);
+        if (body?.error === 'feed_access_disabled') {
+          console.warn(`Could not refresh the WebCraft roster for ${alias}. Set a valid WEBCRAFT_FEED_TOKEN in the WebCraft server process and restart it.`);
+          return;
+        }
+      }
       await response.body?.cancel().catch(() => {});
       throw new Error('WebCraft roster unavailable.');
     }
@@ -86,7 +99,10 @@ export function createPlayerRoster(database: DatabaseSync, instances: ReadonlyMa
     const now = Date.now();
     database.exec('BEGIN');
     try {
-      for (const { uuid, name } of players) save.run(alias, uuid, name, now);
+      for (const { uuid, name, playTimeMinutes } of players) {
+        save.run(alias, uuid, name, now);
+        if (playTimeMinutes !== undefined) stats?.importSaved(alias, uuid, name, playTimeMinutes);
+      }
       database.exec('COMMIT');
     } catch (error) {
       database.exec('ROLLBACK');

@@ -12,6 +12,7 @@ export type Instance = {
   webcraft?: {
     origin: string;
     tokenEnv?: string;
+    accountLinkTokenEnv?: string;
     info: Exposure;
     status: Exposure;
     directoryTransport: 'http' | 'websocket';
@@ -95,6 +96,12 @@ function parseInstance(folder: string, value: unknown, directory: string): Insta
   if (tokenEnv !== undefined && (typeof tokenEnv !== 'string' || !/^[A-Z][A-Z0-9_]*$/.test(tokenEnv))) {
     throw new Error('tokenEnv must name an environment variable.');
   }
+  const accountLinkTokenEnv = 'accountLinkTokenEnv' in value ? value.accountLinkTokenEnv : undefined;
+  if (accountLinkTokenEnv !== undefined && (typeof accountLinkTokenEnv !== 'string'
+    || !/^[A-Z][A-Z0-9_]*$/.test(accountLinkTokenEnv) || accountLinkTokenEnv === tokenEnv
+    || !['127.0.0.1', '[::1]'].includes(url.hostname))) {
+    throw new Error('Account linking requires a separate token environment variable and a loopback WebCraft origin.');
+  }
   const info = 'infoExposure' in value ? value.infoExposure : 'public';
   const status = 'statusExposure' in value ? value.statusExposure : tokenEnv ? 'internal' : 'public';
   if ((info !== 'public' && info !== 'internal') || (status !== 'public' && status !== 'internal')) {
@@ -128,7 +135,7 @@ function parseInstance(folder: string, value: unknown, directory: string): Insta
   }
   return {
     alias, tabs, inbox: join(directory, 'imports'), catalog: join(directory, 'catalog'),
-    webcraft: { origin: url.origin, tokenEnv, info, status, directoryTransport, onlinePlayersTransport,
+    webcraft: { origin: url.origin, tokenEnv, accountLinkTokenEnv, info, status, directoryTransport, onlinePlayersTransport,
       playerHistory, playerRoster, achievements, quests, ponder },
   };
 }

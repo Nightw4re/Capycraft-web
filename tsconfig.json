@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src", "server", ".storybook", "scripts", "vite.config.mts"]
+  "include": ["src", "offline", "server", ".storybook", "scripts", "vite.config.mts"]
 }

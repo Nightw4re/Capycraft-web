@@ -1,0 +1,62 @@
+.progress-dialog {
+  position: fixed;
+  inset: 0;
+  box-sizing: border-box;
+  margin: auto;
+  inline-size: min(var(--progress-dialog-width, 33rem), calc(100% - 1.5rem));
+  block-size: fit-content;
+  max-block-size: min(38rem, calc(100dvh - 1.5rem));
+  padding: 0;
+  overflow: auto;
+  border: 1px solid var(--panel-border);
+  background: var(--panel-background-raised);
+  color: var(--text-color);
+}
+
+.progress-dialog[data-kind="advancement"] { --progress-dialog-width: 27rem; }
+.progress-dialog::backdrop { background: rgb(9 13 23 / 75%); }
+
+.progress-dialog-header {
+  position: sticky;
+  z-index: 1;
+  inset-block-start: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.75rem;
+  border-block-end: 1px solid var(--panel-border);
+  background: var(--panel-background-raised);
+}
+
+.progress-dialog-header h2 {
+  min-inline-size: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font: 600 1.15rem / 1.25 var(--font-heading);
+}
+
+.progress-dialog-header button {
+  flex: none;
+  inline-size: 2.75rem;
+  block-size: 2.75rem;
+  border: 1px solid var(--panel-border);
+  background: var(--panel-background);
+  color: var(--text-color);
+  font: 1.4rem var(--font-heading);
+  cursor: pointer;
+}
+
+.progress-dialog-body {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.65rem 0.75rem;
+  font-size: 0.9rem;
+  line-height: 1.35;
+}
+
+.progress-dialog-body p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+}

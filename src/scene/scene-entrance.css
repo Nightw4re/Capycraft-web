@@ -35,6 +35,13 @@
   padding-block-end: 44dvh;
 }
 
+.scene-content[data-profile-tab="inventory"] > .scene-panels { z-index: 3; }
+
+@media (max-width: 34.375rem) {
+  .scene-content .scene-panels { padding-block-end: 0; }
+  .scene-content { scroll-padding-block-end: 0; }
+}
+
 .scene-content:focus-visible {
   outline: none;
 }

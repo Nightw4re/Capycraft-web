@@ -9,7 +9,7 @@ const examples = [
     address: 'modded-survival.capycraft.example:25565',
     players: { current: 6, max: 24 },
     uptimeMinutes: 2 * 1440 + 8 * 60,
-    worldAgeMinutes: 38 * 1440 + 4 * 60,
+    worldGameTimeTicks: 38 * 24_000 + 9_600,
   },
   {
     name: 'sampleCreativeServer',
@@ -17,7 +17,7 @@ const examples = [
     address: 'creative-world.capycraft.example:25566',
     players: { current: 2, max: 16 },
     uptimeMinutes: 9 * 60 + 15,
-    worldAgeMinutes: 12 * 1440 + 6 * 60,
+    worldGameTimeTicks: 12 * 24_000 + 4_800,
   },
 ] as const;
 

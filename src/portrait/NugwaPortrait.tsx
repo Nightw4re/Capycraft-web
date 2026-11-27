@@ -7,17 +7,20 @@ import { portraitCast } from './portraitCast';
 import { stageHeight, stageWidth } from './portraitScene';
 import { loadVisitorNames, playPortrait } from './playPortrait';
 import './player-portrait.css';
+import { followPageLink, playerProfilePath } from '../navigation';
 
 const bundledNames = portraitCast.map(({ name }) => name);
 
-export function NugwaPortrait({ players, server, arrival }: {
+export function NugwaPortrait({ players, server, arrival, profileServer }: {
   players?: readonly string[];
+  profileServer?: string;
   server?: string;
   arrival?: PortraitArrival;
 }) {
   const { text } = usePreferences();
   const stage = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
+  const webGLCanvas = useRef<HTMLCanvasElement>(null);
   const [mode, setMode] = useState<'still' | 'canvas' | 'image'>('still');
   const [actor, setActor] = useState({ name: bundledNames[0], fallback: false });
   const shown = mode === 'canvas' ? actor : { name: bundledNames[0], fallback: false };
@@ -27,7 +30,8 @@ export function NugwaPortrait({ players, server, arrival }: {
   useEffect(() => {
     const container = stage.current;
     const element = canvas.current;
-    if (!container || !element) return;
+    const webGL = webGLCanvas.current;
+    if (!container || !element || !webGL) return;
 
     const motion = window.matchMedia('(prefers-reduced-motion: no-preference)');
     let playback: AbortController | undefined;
@@ -48,7 +52,7 @@ export function NugwaPortrait({ players, server, arrival }: {
       const start = async () => {
         const names = players ?? await loadVisitorNames(server, controller.signal);
         if (controller.signal.aborted) return;
-        const loaded = await playPortrait(container, element, names, arrival, controller.signal, showImage,
+        const loaded = await playPortrait(container, element, webGL, names, arrival, controller.signal, showImage,
           (name, fallback) => { if (!controller.signal.aborted) setActor({ name, fallback }); }, players === undefined);
         if (!loaded || controller.signal.aborted) return;
         setMode('canvas');
@@ -65,18 +69,22 @@ export function NugwaPortrait({ players, server, arrival }: {
   }, [players, server, arrival]);
 
   return (
-    <div className="player-portrait" ref={stage} role="img" aria-label={label}>
-      <canvas ref={canvas} width={stageWidth} height={stageHeight} hidden={mode !== 'canvas'} aria-hidden="true" />
+    <div className="player-portrait" ref={stage}>
+      <div hidden={mode !== 'canvas'} role="img" aria-label={label}>
+        <canvas ref={webGLCanvas} width={stageWidth} height={stageHeight} />
+        <canvas ref={canvas} width={stageWidth} height={stageHeight} />
+      </div>
       {mode !== 'canvas' && (
         <picture>
           {mode === 'image' && <source media="(prefers-reduced-motion: no-preference)" srcSet={animated} />}
-          <img src={still} width={stageWidth} height={stageHeight} alt="" onError={() => {
+          <img src={still} width={stageWidth} height={stageHeight} alt={label} onError={() => {
             if (mode === 'image') setMode('still');
           }} />
         </picture>
       )}
-      {mode !== 'image' && <span className="player-portrait-name" aria-hidden="true">
-        {shown.name}{shown.fallback && <small>{text.portraitSkinUnavailable}</small>}
+      {mode !== 'image' && <span className="player-portrait-name">
+        {profileServer ? <a href={playerProfilePath(profileServer, shown.name)} onClick={followPageLink}>{shown.name}</a> : shown.name}
+        {shown.fallback && <small>{text.portraitSkinUnavailable}</small>}
       </span>}
     </div>
   );

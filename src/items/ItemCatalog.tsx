@@ -1,27 +1,25 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FocusEvent, type MouseEvent, type PointerEvent, type ReactNode, type RefObject } from 'react';
-import { createPortal } from 'react-dom';
 import copyIcon from '../../assets/pixel-copy-papers.png';
 import { InfoPanel } from '../layout/InfoPanel';
 import { PageLayout } from '../layout/PageLayout';
 import { PlayIcon } from '../layout/PlayIcon';
 import { plainMinecraftText } from '../layout/minecraftMotd';
+import { pageTitle } from '../pageMetadata.mts';
 import { useNotifications } from '../notifications/Notifications';
 import type { ItemRecipeView, ItemRoute, RecipeIngredientRoute } from '../navigation';
-import type { TooltipModes } from '../preferences';
 import { usePreferences } from '../PreferencesProvider';
 import { HeaderPicker } from '../scene/HeaderPicker';
 import { useSceneContentReady } from '../scene/SceneEntrance';
-import { animatePageArrival, animatePageDeparture } from '../scene/pageMotion';
-import { useHeaderDisclosure } from '../scene/useHeaderDisclosure';
-import { useLiveCatalog } from '../ServerDirectoryProvider';
-import { isItemId, loadCatalog, loadItemDetails, loadItemPayload, type Catalog, type CatalogItem, type ItemSprite, type ItemVariant } from './catalogData';
+import { animatePageArrival, animatePageDeparture, animatePanelArrival } from '../scene/pageMotion';
+import type { CatalogUpdate } from '../liveUpdates.mts';
+import { CatalogImportNotice } from './CatalogImportNotice';
+import { isItemId, loadCatalog, loadItemDetails, loadItemPayload, spriteForIcon, type Catalog, type CatalogItem, type ItemSprite, type ItemVariant } from './catalogData';
 import { catalogSearchTerms, catalogSearchWithMod, type ItemBar } from './catalogIndex.mjs';
 import { pageSize, atlasColumns, tileSize } from './catalogLayout.json';
 import { ItemLoadingHint } from './ItemLoadingHint';
 import { ModPicker } from './ModPicker';
 import { readLegacyRecipes, readRecipeFeed, recipeStations, type MachineIngredient, type MachineRecipe, type MachineRecipeSlot, type RecipeEntry, type RecipeIngredient } from './itemRecipes';
-import { ItemTooltip, ItemTooltipPopover, MinecraftItemText, loadPageTooltipShortcuts, useItemTooltip } from './ItemTooltip';
-import { ItemTooltipTools, tooltipShortcutColor } from './ItemTooltipTools';
+import { ItemTooltip, ItemTooltipPopover, MinecraftItemText, type TooltipTarget } from './ItemTooltip';
 import './items.css';
 
 const atlasRows = pageSize / atlasColumns;
@@ -34,12 +32,6 @@ const ingredientTooltipLimit = 12;
 const pageSelectionDelayMs = 90;
 const itemDetailsLoadingDelayMs = 180;
 const wideCatalogQuery = '(min-width: 68rem)';
-
-function animateItemArrival(element: HTMLElement | null | undefined, direction = 1) {
-  if (element?.animate && window.matchMedia('(prefers-reduced-motion: no-preference)').matches) {
-    return animatePageArrival(element, direction);
-  }
-}
 
 type ItemNavigation = {
   itemHref: (id: string, view?: ItemRecipeView) => string;
@@ -60,6 +52,7 @@ type RecipeNavigation = IngredientNavigation & {
 
 type ServerItemsProps = ItemNavigation & Omit<RecipeNavigation, 'ingredient' | 'recipeStation' | 'recipePage'> & {
   server: string;
+  catalogUpdate?: CatalogUpdate;
   showCatalog: boolean;
   page: number;
   query: string;
@@ -93,9 +86,10 @@ function useRequest<T>(load: (signal: AbortSignal) => Promise<T>, enabled = true
   return { state, retry };
 }
 
-function ItemIcon({ icon, sprite, bar, fluid = false, pending = false, lazy = false, timeout, onImageSettled }: {
+export function ItemIcon({ icon, sprite: explicitSprite, useIconSprite = true, bar, fluid = false, pending = false, lazy = false, timeout, onImageSettled }: {
   icon?: string;
   sprite?: ItemSprite;
+  useIconSprite?: boolean;
   bar?: ItemBar;
   fluid?: boolean;
   pending?: boolean;
@@ -104,6 +98,7 @@ function ItemIcon({ icon, sprite, bar, fluid = false, pending = false, lazy = fa
   onImageSettled?: (url: string) => void;
 }) {
   const image = useRef<HTMLImageElement>(null);
+  const sprite = explicitSprite ?? (useIconSprite && !fluid && !pending ? spriteForIcon(icon) : undefined);
   const imageUrl = sprite || pending ? undefined : icon;
 
   useEffect(() => {
@@ -139,7 +134,7 @@ function ItemIcon({ icon, sprite, bar, fluid = false, pending = false, lazy = fa
       )}
       {imageUrl && (
         <img
-          key={imageUrl} ref={image} src={imageUrl} alt="" width={tileSize} height={tileSize} decoding="async"
+          key={imageUrl} ref={image} src={imageUrl} alt="" width={tileSize} height={tileSize} decoding="async" draggable={false}
           loading={lazy ? 'lazy' : undefined}
           onLoad={onImageSettled && (event => {
             const settle = () => onImageSettled(imageUrl);
@@ -159,51 +154,37 @@ function ItemIcon({ icon, sprite, bar, fluid = false, pending = false, lazy = fa
   );
 }
 
-type TooltipTarget<Element extends HTMLElement = HTMLElement> = {
-  anchor: Element;
-  triggerId: string;
-  touch: boolean;
-};
+export type { TooltipTarget } from './ItemTooltip';
 
 function useTooltipTrigger<Element extends HTMLElement>(
   target: TooltipTarget | undefined, show: (target: TooltipTarget<Element>) => void, hide: (anchor: Element) => void,
 ) {
   const triggerId = useId();
-  const lastPointerType = useRef<string>(undefined);
   const active = target?.triggerId === triggerId;
-  const touch = active && target.touch;
+  const pinned = active && target.pinned;
 
-  function reveal(anchor: Element, touch: boolean) {
-    show({ anchor, triggerId, touch });
+  function preview(anchor: Element) {
+    if (!anchor.ownerDocument.querySelector('.item-tooltip[data-pinned]')) show({ anchor, triggerId });
   }
 
   return {
     active,
-    touch,
+    pinned,
     onPointerEnter(event: PointerEvent<Element>) {
-      if (event.pointerType !== 'touch') reveal(event.currentTarget, false);
+      if (event.pointerType !== 'touch') preview(event.currentTarget);
     },
     onPointerLeave(event: PointerEvent<Element>) {
-      if (event.pointerType !== 'touch' && active && !touch) hide(event.currentTarget);
-    },
-    onPointerDown(event: PointerEvent<Element>) {
-      lastPointerType.current = event.pointerType;
+      if (event.pointerType !== 'touch' && active && !pinned) hide(event.currentTarget);
     },
     onFocus(event: FocusEvent<Element>) {
-      if (!active && event.currentTarget.matches(':focus-visible')) reveal(event.currentTarget, false);
+      if (!active && event.currentTarget.matches(':focus-visible')) show({ anchor: event.currentTarget, triggerId });
     },
     onBlur(event: FocusEvent<Element>) {
-      const next = event.relatedTarget;
-      if (active && (!touch || (next && !next.closest('.item-tooltip-tools')))) hide(event.currentTarget);
+      if (active && !pinned) hide(event.currentTarget);
     },
-    previewTouch(event: MouseEvent<Element>) {
-      const { nativeEvent } = event;
-      // WebKit can report a mouse click after a touch pointer press.
-      const pointerType = (event.detail > 0 ? lastPointerType.current : undefined)
-        || ('pointerType' in nativeEvent ? nativeEvent.pointerType : undefined);
-      lastPointerType.current = undefined;
-      if (pointerType !== 'touch' || touch) return false;
-      reveal(event.currentTarget, true);
+    pin(event: MouseEvent<Element>, options?: Pick<TooltipTarget, 'actions' | 'recipeHelp'>) {
+      if (pinned) return false;
+      show({ anchor: event.currentTarget, triggerId, pinned: true, keyboard: event.detail === 0, ...options });
       return true;
     },
   };
@@ -215,9 +196,11 @@ type ItemLinkActions = ItemNavigation & {
   description?: TooltipTarget & { id: string };
 };
 
-function ItemLink({ item, label = item.name, itemHref, description, showTooltip, hideTooltip, onOpenItem, children }: ItemLinkActions & {
+export function ItemLink({ item, label = item.name, className, itemHref, description, showTooltip, hideTooltip, onOpenItem,
+  children }: ItemLinkActions & {
   item: CatalogItem;
   label?: string;
+  className?: string;
   children: ReactNode;
 }) {
   const press = useRef<{ id: number; x: number; y: number; timer: number } | null>(null);
@@ -238,14 +221,14 @@ function ItemLink({ item, label = item.name, itemHref, description, showTooltip,
     onOpenItem(item.id, view, item);
   }
 
-  return <a className="item-slot-button" href={itemHref(item.id)} aria-label={plainMinecraftText(label)} aria-haspopup="dialog"
-    aria-describedby={tooltip.active ? description?.id : undefined}
-    aria-keyshortcuts="Shift+F10"
+  return <a className={className ? `item-slot-button ${className}` : 'item-slot-button'} href={itemHref(item.id)} draggable={false}
+    aria-label={plainMinecraftText(label)} aria-haspopup="dialog"
+    aria-describedby={tooltip.active && !tooltip.pinned ? description?.id : undefined}
+    aria-expanded={!!tooltip.pinned} aria-controls={tooltip.pinned ? description?.id : undefined}
     data-holding={holding || undefined} style={holding ? { '--item-hold-duration': `${itemHoldMs}ms` } as CSSProperties : undefined}
     onPointerEnter={tooltip.onPointerEnter}
     onPointerLeave={tooltip.onPointerLeave}
     onPointerDown={event => {
-      tooltip.onPointerDown(event);
       suppressClick.current = false;
       if (event.pointerType !== 'touch' || !event.isPrimary || press.current) return;
       const { pointerId, clientX, clientY } = event;
@@ -271,14 +254,12 @@ function ItemLink({ item, label = item.name, itemHref, description, showTooltip,
         event.preventDefault();
         hideTooltip(event.currentTarget);
       }
-      if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
-        event.preventDefault();
-        open('uses');
-      }
     }}
     onContextMenu={event => {
+      const touch = 'pointerType' in event.nativeEvent && event.nativeEvent.pointerType === 'touch';
+      if (event.button !== 2 && !touch) return;
       event.preventDefault();
-      if (!press.current && !suppressClick.current && !('pointerType' in event.nativeEvent && event.nativeEvent.pointerType === 'touch')) {
+      if (!touch && !press.current && !suppressClick.current) {
         open('uses');
       }
     }}
@@ -290,20 +271,19 @@ function ItemLink({ item, label = item.name, itemHref, description, showTooltip,
       }
       if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
       event.preventDefault();
-      if (!tooltip.previewTouch(event)) open('recipes');
+      if (!tooltip.pin(event, { recipeHelp: true })) open('recipes');
     }}>
     {children}
   </a>;
 }
 
-export function ServerItems({ server, showCatalog, page, query, onPageChange, item, onCloseItem, onRecipePositionChange,
+export function ServerItems({ server, catalogUpdate, showCatalog, page, query, onPageChange, item, onCloseItem, onRecipePositionChange,
   onOpenIngredient, onCloseIngredient, ...navigation }: ServerItemsProps) {
-  const { language, text, tooltipModes, update } = usePreferences();
+  const { text } = usePreferences();
   const load = useCallback((signal: AbortSignal) => loadCatalog(server, signal), [server]);
   const { state: initial, retry: retryInitial } = useRequest(load);
   const [refreshed, setRefreshed] = useState<Catalog | null>();
-  const { status: importStatus, version } = useLiveCatalog(server) ?? {};
-  const [tooltipToolsHost, setTooltipToolsHost] = useState<HTMLDivElement | null>(null);
+  const { status: importStatus, version } = catalogUpdate ?? {};
   const [openedItem, setOpenedItem] = useState<{ catalog: Catalog; preview: CatalogItem }>();
   const [wideCatalog, setWideCatalog] = useState(() => window.matchMedia(wideCatalogQuery).matches);
   const inlineDetails = showCatalog && wideCatalog;
@@ -317,31 +297,6 @@ export function ServerItems({ server, showCatalog, page, query, onPageChange, it
   const state = refreshed === undefined ? initial : { status: 'ready' as const, data: refreshed };
   const catalog = state.status === 'ready' ? state.data : null;
   const preview = openedItem && openedItem.catalog === catalog && openedItem.preview.id === visibleItem?.id ? openedItem.preview : undefined;
-  const progress = catalog?.progress;
-  const format = new Intl.NumberFormat(language);
-  let notice = '';
-  if (importStatus?.state === 'running') {
-    const counts = importStatus.progress;
-    const percent = counts?.expected ? new Intl.NumberFormat(language, { style: 'percent' })
-      .format(Math.floor(counts.loaded * 100 / counts.expected) / 100) : undefined;
-    if (catalog && !progress) {
-      if (importStatus.phase === 'preparing') {
-        notice = text.itemUpdatePreparing;
-      } else if (importStatus.phase === 'publishing') {
-        notice = text.itemUpdatePublishing;
-      } else if (percent) {
-        notice = text.itemUpdateProgress(percent);
-      } else {
-        notice = text.itemUpdateRunning;
-      }
-    } else if (counts && percent) {
-      notice = text.itemImportProgress(format.format(counts.loaded), format.format(counts.expected), percent);
-    } else {
-      notice = text.itemImportStarting;
-    }
-  } else if (progress?.failed || importStatus?.state === 'failed') {
-    notice = progress ? text.itemImportFailed : text.itemImportStopped;
-  }
 
   useEffect(() => {
     const media = window.matchMedia(wideCatalogQuery);
@@ -415,10 +370,6 @@ export function ServerItems({ server, showCatalog, page, query, onPageChange, it
     retryInitial();
   }
 
-  function setTooltipModes(modes: TooltipModes) {
-    update({ tooltipModes: modes });
-  }
-
   function openCatalogItem(id: string, view?: ItemRecipeView, preview?: CatalogItem) {
     setOpenedItem(catalog && preview ? { catalog, preview } : undefined);
     navigation.onOpenItem(id, view);
@@ -427,7 +378,7 @@ export function ServerItems({ server, showCatalog, page, query, onPageChange, it
   const detail = visibleItem && <ItemDialog inline={inlineDetails} layoutReady={!inlineDetails || splitReady}
     closing={detailClosing} itemId={visibleItem.id} preview={preview} recipeView={visibleItem.view}
     ingredient={item?.ingredient} recipeStation={visibleItem.station}
-    catalog={catalog} modes={tooltipModes} onModesChange={setTooltipModes} onClose={onCloseItem}
+    catalog={catalog} onClose={onCloseItem}
     recipePage={visibleItem.recipePage} onRecipePositionChange={onRecipePositionChange}
     onOpenIngredient={onOpenIngredient} onCloseIngredient={onCloseIngredient}
     itemHref={navigation.itemHref} onOpenItem={openCatalogItem}>
@@ -438,15 +389,11 @@ export function ServerItems({ server, showCatalog, page, query, onPageChange, it
   </ItemDialog>;
 
   return <>
-    {showCatalog && !visibleItem && <div className="item-catalog-tools-anchor">
-      <div className="item-catalog-tools-float" ref={setTooltipToolsHost}>
-        {!catalog && <ItemTooltipTools modes={tooltipModes} onChange={setTooltipModes} />}
-      </div>
-    </div>}
-    {showCatalog && <div className="item-import-notice"><p role="status">{notice}</p></div>}
-    {showCatalog && <PageLayout title={text.items}>
+    {showCatalog && <CatalogImportNotice status={importStatus} updating={!!catalog && !catalog.progress} partial={catalog?.progress} />}
+    {showCatalog && <PageLayout>
       <div className="item-catalog-layout" ref={layout} data-wide={inlineDetails || undefined} data-split={splitOpen || undefined}>
         <InfoPanel>
+          <h1 className="page-layout-title">{text.items}</h1>
           {state.status === 'loading' && <p role="status">{text.itemLoading}</p>}
           {state.status === 'error' && (
             <div>
@@ -461,8 +408,7 @@ export function ServerItems({ server, showCatalog, page, query, onPageChange, it
             </div>
           )}
           {catalog && <ItemList catalog={catalog} page={page} query={query} onPageChange={onPageChange}
-            modes={tooltipModes} onModesChange={setTooltipModes}
-            dialogOpen={!!item && !inlineDetails} tooltipToolsHost={!visibleItem ? tooltipToolsHost : null} itemHref={navigation.itemHref}
+            dialogOpen={!!item && !inlineDetails} itemHref={navigation.itemHref}
             onOpenItem={openCatalogItem} />}
         </InfoPanel>
         {detail}
@@ -478,20 +424,16 @@ type InventoryPage = {
   number: number;
   items: CatalogItem[];
   total: number;
-  useAtlases: boolean;
 };
 
 type PageTarget = { source: string; number: number };
 
-function ItemList({ catalog, page, query, onPageChange, modes, onModesChange, dialogOpen, tooltipToolsHost, ...navigation }: ItemNavigation & {
+function ItemList({ catalog, page, query, onPageChange, dialogOpen, ...navigation }: ItemNavigation & {
   catalog: Catalog;
   page: number;
   query: string;
   onPageChange: ServerItemsProps['onPageChange'];
-  modes: TooltipModes;
-  onModesChange: (modes: TooltipModes) => void;
   dialogOpen: boolean;
-  tooltipToolsHost: HTMLDivElement | null;
 }) {
   const { language, text } = usePreferences();
   const [search, setSearch] = useState(query);
@@ -504,7 +446,6 @@ function ItemList({ catalog, page, query, onPageChange, modes, onModesChange, di
   const [hovered, setHovered] = useState<TooltipTarget<HTMLAnchorElement> & { item: CatalogItem }>();
   const tooltipId = useId();
   const tooltip = dialogOpen ? undefined : hovered;
-  const tooltipData = useItemTooltip(tooltip?.item);
   const [shown, setShown] = useState<InventoryPage>();
   const inventory = useRef<HTMLDivElement>(null);
   const clearTarget = useCallback(() => {
@@ -548,20 +489,8 @@ function ItemList({ catalog, page, query, onPageChange, modes, onModesChange, di
     key: JSON.stringify([source, page]),
     source,
     number: page,
-    useAtlases: !query.trim(),
-  }) : undefined, [result, outOfBounds, source, page, query]);
+  }) : undefined, [result, outOfBounds, source, page]);
   const displayed = shown ?? requested;
-  const displayedItems = displayed?.items;
-  const loadShortcuts = useCallback((signal: AbortSignal) => loadPageTooltipShortcuts(displayedItems ?? [], signal),
-    [displayedItems]);
-  const { state: shortcuts } = useRequest(loadShortcuts, catalog.tooltipShortcuts === undefined);
-  const pageShortcuts = shortcuts.status === 'ready' ? shortcuts.data : undefined;
-  const selectedShortcut = modes.shortcut;
-  const highlightedItems = selectedShortcut === undefined ? undefined : catalog.tooltipShortcuts === undefined
-    ? pageShortcuts?.find(shortcut => shortcut.id === selectedShortcut)?.itemIds
-    : new Set(displayedItems?.filter(item => item.tooltipShortcutIds?.includes(selectedShortcut)).map(item => item.id));
-  const highlight = selectedShortcut !== undefined && highlightedItems?.size
-    ? { color: tooltipShortcutColor(selectedShortcut), itemIds: highlightedItems } : undefined;
   const preparing = shown && requested?.items.length
     && shown.key !== requested.key ? requested : undefined;
   const loading = state.status === 'loading' || outOfBounds || preparing !== undefined;
@@ -657,7 +586,7 @@ function ItemList({ catalog, page, query, onPageChange, modes, onModesChange, di
 
   function updateTooltipOnScroll(scroller: HTMLDivElement) {
     if (!hovered || !scroller.contains(hovered.anchor)) return;
-    if (hovered.touch || !hovered.anchor.matches(':hover, :focus-visible')) hideTooltip(hovered.anchor);
+    if (!hovered.pinned && !hovered.anchor.matches(':hover, :focus-visible')) hideTooltip(hovered.anchor);
   }
 
   const selectPage = useCallback((number: number) => {
@@ -721,8 +650,7 @@ function ItemList({ catalog, page, query, onPageChange, modes, onModesChange, di
           {[displayed, preparing].map(view => view && (
             <div key={view.key} className="item-inventory" data-preparing={view === preparing || undefined}
               inert={view === preparing} onScroll={event => updateTooltipOnScroll(event.currentTarget)}>
-              <ItemGrid items={view.items} useAtlases={view.useAtlases}
-                highlight={view === displayed ? highlight : undefined}
+              <ItemGrid items={view.items}
                 onReady={view === preparing ? showPreparedPage : undefined}
                 description={view === displayed && tooltip ? { ...tooltip, id: tooltipId } : undefined}
                 showTooltip={showTooltip} hideTooltip={hideTooltip} {...navigation} />
@@ -730,10 +658,7 @@ function ItemList({ catalog, page, query, onPageChange, modes, onModesChange, di
           ))}
         </div>
       )}
-      <ItemTooltip id={tooltipId} modes={modes} data={tooltipData}
-        item={tooltip?.item} anchor={tooltip?.anchor} onDismiss={hideTooltip} />
-      {tooltipToolsHost && createPortal(<ItemTooltipTools modes={modes} onChange={onModesChange}
-        shortcuts={catalog.tooltipShortcuts ?? pageShortcuts} />, tooltipToolsHost)}
+      {tooltip && <ItemTooltip id={tooltipId} item={tooltip.item} target={tooltip} onDismiss={hideTooltip} />}
       {pageCount > 0 && <ItemPagination currentPage={selectedPage} displayedPage={displayedNumber} pageCount={pageCount}
         disabled={!canNavigate} onStep={movePage} onSelectPage={selectPage} />}
     </>
@@ -779,8 +704,8 @@ function ItemPagination({ currentPage, displayedPage = currentPage, pageCount, d
 
 type AtlasStatus = 'ready' | 'failed';
 
-function catalogSprite(item: CatalogItem, useAtlases: boolean) {
-  return useAtlases && !item.fluidId ? item.sprite : undefined;
+function catalogSprite(item: CatalogItem) {
+  return item.fluidId ? undefined : item.sprite;
 }
 
 function loadAtlas(url: string, onSettled: (status: AtlasStatus) => void) {
@@ -809,10 +734,8 @@ function loadAtlas(url: string, onSettled: (status: AtlasStatus) => void) {
   };
 }
 
-function ItemGrid({ items, useAtlases, highlight, onReady, ...links }: ItemLinkActions & {
+function ItemGrid({ items, onReady, ...links }: ItemLinkActions & {
   items: CatalogItem[];
-  useAtlases: boolean;
-  highlight?: { color: string; itemIds: ReadonlySet<string> };
   onReady?: () => void;
 }) {
   const { text } = usePreferences();
@@ -840,7 +763,7 @@ function ItemGrid({ items, useAtlases, highlight, onReady, ...links }: ItemLinkA
         return next;
       });
       for (const item of visibleItems) {
-        const url = catalogSprite(item, useAtlases)?.url;
+        const url = catalogSprite(item)?.url;
         if (!url || atlasRequests.has(url)) continue;
         atlasRequests.set(url, loadAtlas(url, status => {
           setAtlasStatuses(current => new Map(current).set(url, status));
@@ -867,34 +790,32 @@ function ItemGrid({ items, useAtlases, highlight, onReady, ...links }: ItemLinkA
       observer?.disconnect();
       atlasRequests.forEach(cancel => cancel());
     };
-  }, [items, preloadPage, useAtlases]);
+  }, [items, preloadPage]);
 
   useEffect(() => {
     if (!onReady || !seenItems) return;
     for (const item of items) {
       if (!seenItems.has(item.id) || !item.icon) continue;
-      const sprite = catalogSprite(item, useAtlases);
+      const sprite = catalogSprite(item);
       const status = sprite && atlasStatuses.get(sprite.url);
       if (sprite && !status) return;
       if (status !== 'ready' && !settledImages.has(item.icon)) return;
     }
     onReady();
-  }, [items, useAtlases, onReady, seenItems, atlasStatuses, settledImages]);
+  }, [items, onReady, seenItems, atlasStatuses, settledImages]);
 
   return (
-    <ul className="item-grid" ref={grid} aria-label={text.items}
-      style={highlight ? { '--item-shortcut-color': highlight.color } as CSSProperties : undefined}>
+    <ul className="item-grid" ref={grid} aria-label={text.items}>
       {items.map(item => {
         const seen = seenItems?.has(item.id);
-        const sprite = catalogSprite(item, useAtlases);
+        const sprite = catalogSprite(item);
         const atlasStatus = seen && sprite ? atlasStatuses.get(sprite.url) : undefined;
         const pending = Boolean(item.icon && (!seen || (sprite && !atlasStatus)));
-        const matchesShortcut = highlight?.itemIds.has(item.id);
         return (
-          <li className="item-slot" key={item.id} data-shortcut-match={matchesShortcut || undefined}>
+          <li className="item-slot" key={item.id}>
             <ItemLink item={item} {...links}>
               <ItemIcon icon={item.icon} sprite={atlasStatus === 'ready' ? sprite : undefined} bar={item.bar}
-                fluid={!!item.fluidId} pending={pending}
+                useIconSprite={false} fluid={!!item.fluidId} pending={pending}
                 timeout={iconTimeoutMs} onImageSettled={onReady ? markImageSettled : undefined} />
             </ItemLink>
           </li>
@@ -907,7 +828,7 @@ function ItemGrid({ items, useAtlases, highlight, onReady, ...links }: ItemLinkA
   );
 }
 
-function ItemDialog({ inline, layoutReady, closing, itemId, preview, catalog, recipeView, modes, onModesChange, onClose, children,
+function ItemDialog({ inline, layoutReady, closing, itemId, preview, catalog, recipeView, onClose, children,
   ingredient, onOpenIngredient, onCloseIngredient, recipeStation, recipePage, onRecipePositionChange,
   itemHref, onOpenItem }: ItemNavigation & RecipeNavigation & {
   inline: boolean;
@@ -917,24 +838,23 @@ function ItemDialog({ inline, layoutReady, closing, itemId, preview, catalog, re
   preview?: CatalogItem;
   catalog: Catalog | null;
   recipeView: ItemRecipeView;
-  modes: TooltipModes;
-  onModesChange: (modes: TooltipModes) => void;
   onClose: () => void;
   children: ReactNode;
 }) {
-  const { text } = usePreferences();
+  const { text, advancedItemTooltips: advanced } = usePreferences();
   const notify = useNotifications();
   const sceneContentReady = useSceneContentReady();
   const dialog = useRef<HTMLDialogElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
-  const toolsId = useId();
-  const { open: toolsOpen, setOpen: setToolsOpen, root: toolsRoot, trigger: toolsTrigger, closeAndFocus: closeTools,
-    onBlur: onToolsBlur, onKeyDown: onToolsKeyDown } = useHeaderDisclosure();
   const [detailReady, setDetailReady] = useState(false);
   const load = useMemo(() => (signal: AbortSignal) => preview || !catalog
     ? Promise.resolve(preview) : catalog.getItem(itemId, signal), [catalog, preview, itemId]);
   const { state, retry } = useRequest(load);
   const selected = preview ?? (state.status === 'ready' ? state.data : undefined);
+  const itemName = selected?.id === itemId ? plainMinecraftText(selected.name).trim() : undefined;
+  useEffect(() => {
+    if (!closing && itemName) document.title = pageTitle(itemName);
+  }, [closing, itemId, itemName]);
   const itemLoading = !!catalog && !selected && state.status === 'loading';
   const minecraftId = selected?.fluidId ?? selected?.id;
   const recipeLabel = recipeView === 'uses' ? text.itemRecipeUses : text.itemRecipes;
@@ -944,25 +864,19 @@ function ItemDialog({ inline, layoutReady, closing, itemId, preview, catalog, re
   const details = useRequest(loadDetails);
   const data = details.state.status === 'ready' ? details.state.data : undefined;
   const [selectedVariant, setSelectedVariant] = useState<{ itemId: string; id: string }>();
-  const variant = modes.advanced && selectedVariant?.itemId === itemId
+  const variant = advanced && selectedVariant?.itemId === itemId
     ? data?.variants.find(entry => entry.id === selectedVariant.id) : undefined;
   const payloads = variant ? variant.payloads : data?.payloads;
-  const catalogShortcuts = catalog?.tooltipShortcuts;
-  const tooltipData = useItemTooltip(selected, catalogShortcuts === undefined ? payloads ?? null : null);
-  const shortcutsReady = !itemLoading && !(selected?.detail && details.state.status === 'loading') && !tooltipData.loading;
-  const [previousHeader, setPreviousHeader] = useState({ title, minecraftId, shortcuts: tooltipData.shortcuts });
+  const [previousHeader, setPreviousHeader] = useState({ title, minecraftId });
   const visibleTitle = itemLoading ? previousHeader.title : title;
-  const shortcuts = shortcutsReady ? tooltipData.shortcuts : previousHeader.shortcuts;
-
-  useLayoutEffect(() => setSelectedVariant(undefined), [itemId]);
 
   useLayoutEffect(() => {
-    setPreviousHeader(current => ({
-      title: itemLoading ? current.title : title,
-      minecraftId: itemLoading ? current.minecraftId : minecraftId,
-      shortcuts: shortcutsReady ? tooltipData.shortcuts : current.shortcuts,
-    }));
-  }, [itemLoading, title, minecraftId, shortcutsReady, tooltipData.shortcuts]);
+    setSelectedVariant(undefined);
+  }, [itemId]);
+
+  useLayoutEffect(() => {
+    if (!itemLoading) setPreviousHeader({ title, minecraftId });
+  }, [itemLoading, title, minecraftId]);
 
   function openRecipeItem(nextId: string, view: ItemRecipeView = 'recipes', preview?: CatalogItem) {
     if (nextId !== itemId || view !== recipeView) {
@@ -988,7 +902,7 @@ function ItemDialog({ inline, layoutReady, closing, itemId, preview, catalog, re
     if (!sceneContentReady || !layoutReady || !element) return;
     if (inline) element.setAttribute('open', '');
     else element.showModal();
-    const arrival = animateItemArrival(element.querySelector<HTMLElement>('.item-recipe-detail'));
+    const arrival = animatePanelArrival(element.querySelector<HTMLElement>('.item-recipe-detail'));
     setDetailReady(true);
     return () => {
       arrival?.cancel();
@@ -999,7 +913,7 @@ function ItemDialog({ inline, layoutReady, closing, itemId, preview, catalog, re
 
   return (
     <dialog className="item-detail-overlay" data-inline={inline || undefined} inert={closing} role={inline ? 'region' : undefined}
-      ref={dialog} aria-label={plainMinecraftText(selected && !selected.fluidId ? `${visibleTitle} · ${selected.name}` : visibleTitle)}
+      ref={dialog} aria-label={plainMinecraftText(itemName && !selected?.fluidId ? `${visibleTitle} · ${itemName}` : visibleTitle)}
       onCancel={event => { event.preventDefault(); onClose(); }}>
       <div className="item-detail item-recipe-detail">
         <div className="item-detail-heading">
@@ -1009,22 +923,6 @@ function ItemDialog({ inline, layoutReady, closing, itemId, preview, catalog, re
               onClick={copyMinecraftId} aria-label={text.copyItemId} title={text.copyItemId}>
               <img src={copyIcon} width={22} height={22} alt="" />
             </button>}
-            <div className="item-detail-tools-disclosure" ref={toolsRoot} onBlur={onToolsBlur} onKeyDown={onToolsKeyDown}>
-              <button className="item-action item-detail-tools-toggle" type="button" ref={toolsTrigger}
-                aria-label={text.itemTooltipModes} title={text.itemTooltipModes} aria-expanded={toolsOpen} aria-controls={toolsId}
-                onClick={() => setToolsOpen(open => !open)}>
-                <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true">
-                  <rect x="2" y="4.5" width="16" height="11" rx="1" />
-                  <path d="M5 8h2m2 0h2m2 0h2m-10 3h2m2 0h6" />
-                </svg>
-              </button>
-              <div className="item-detail-tools-float" id={toolsId} data-open={toolsOpen || undefined}>
-                <ItemTooltipTools modes={modes} onChange={next => {
-                  onModesChange(next);
-                  if (toolsOpen) closeTools();
-                }} shortcuts={catalogShortcuts ?? shortcuts} />
-              </div>
-            </div>
             <button className="item-action item-detail-close" type="button" onClick={onClose} aria-label={text.close}>×</button>
           </div>
         </div>
@@ -1033,7 +931,7 @@ function ItemDialog({ inline, layoutReady, closing, itemId, preview, catalog, re
             details.state.status === 'error' ? <ItemRequestError retry={details.retry} /> :
               <ItemDetails key={itemId} item={selected} data={data} variant={variant}
                 onVariantChange={id => setSelectedVariant({ itemId, id })}
-                catalog={catalog} modes={modes} stackUrl={payloads?.stack} itemHref={itemHref} onOpenItem={openRecipeItem}
+                catalog={catalog} advanced={advanced} stackUrl={payloads?.stack} itemHref={itemHref} onOpenItem={openRecipeItem}
                 ingredient={ingredient} onCloseIngredient={onCloseIngredient} onOpenIngredient={onOpenIngredient}
                 recipeStation={recipeStation} recipePage={recipePage} onRecipePositionChange={onRecipePositionChange}
                 recipeView={recipeView} recipeLabel={recipeLabel} />
@@ -1064,7 +962,7 @@ function ItemRequestError({ retry }: { retry: () => void }) {
   </div>;
 }
 
-type RecipeCatalog = ItemNavigation & RecipeNavigation & { catalog: Catalog; item: CatalogItem; modes: TooltipModes };
+type RecipeCatalog = ItemNavigation & RecipeNavigation & { catalog: Catalog; item: CatalogItem };
 type IngredientSelection = { input: RecipeIngredient; findItem: (id: string) => CatalogItem | undefined };
 type MachineOptions = { alternatives: MachineIngredient[]; fluidIcon: (ingredient: MachineIngredient) => string | undefined };
 
@@ -1120,11 +1018,12 @@ function ingredientOptionName(option: IngredientOption, item?: CatalogItem) {
   return amount === undefined ? name : `${amount} × ${name}`;
 }
 
-function ItemDetails({ item, data, variant, onVariantChange, catalog, modes, stackUrl, recipeView, recipeLabel,
+function ItemDetails({ item, data, variant, onVariantChange, catalog, advanced, stackUrl, recipeView, recipeLabel,
   ...navigation }: RecipeCatalog & {
   data?: Awaited<ReturnType<typeof loadItemDetails>>;
   variant?: ItemVariant;
   onVariantChange: (id: string) => void;
+  advanced: boolean;
   stackUrl?: string;
   recipeView: ItemRecipeView;
   recipeLabel: string;
@@ -1132,7 +1031,7 @@ function ItemDetails({ item, data, variant, onVariantChange, catalog, modes, sta
   const { text, language } = usePreferences();
   const variants = data?.variants ?? [];
   const legacyRecipes = useMemo(() => data?.recipes && readLegacyRecipes(data.recipes, item.id), [data?.recipes, item.id]);
-  const recipeCatalog = { item, catalog, modes, ...navigation };
+  const recipeCatalog = { item, catalog, ...navigation };
   const { id, fluidId } = item;
   const loadUses = useMemo(() => (signal: AbortSignal) =>
     catalog.getRecipeUses?.(fluidId ?? id, signal, fluidId ? 'fluid' : undefined) ?? Promise.resolve(undefined), [catalog, fluidId, id]);
@@ -1155,7 +1054,7 @@ function ItemDetails({ item, data, variant, onVariantChange, catalog, modes, sta
       <div className="item-detail-section" data-section="recipes" key={recipeView} role="region" aria-label={recipeLabel} tabIndex={0}>
         {content}
       </div>
-      {modes.advanced && variants.length > 0 && (
+      {advanced && variants.length > 0 && (
         <div className="item-variants item-picker">
           <span>{text.itemVariants}</span>
           <HeaderPicker label={text.itemVariants} value={variant?.id ?? ''}
@@ -1163,7 +1062,7 @@ function ItemDetails({ item, data, variant, onVariantChange, catalog, modes, sta
             onChange={onVariantChange} />
         </div>
       )}
-      {modes.advanced && stackUrl && <ItemPayload label={text.itemStackData}>
+      {advanced && stackUrl && <ItemPayload label={text.itemStackData}>
         <PayloadContent url={stackUrl} render={data => <pre>{JSON.stringify(data, null, 2)}</pre>} />
       </ItemPayload>}
       {publishedAt !== undefined && <p className="item-recipe-published">
@@ -1202,7 +1101,7 @@ function recipeStationIconId(station: string) {
   return station === 'immersiveengineering:bottling_buckets' ? 'minecraft:bucket' : station;
 }
 
-function RecipeTabs({ recipes, feed, emptyLabel, item, catalog, modes, itemHref, onOpenItem,
+function RecipeTabs({ recipes, feed, emptyLabel, item, catalog, itemHref, onOpenItem,
   ingredient, onOpenIngredient, onCloseIngredient, recipeStation, recipePage, onRecipePositionChange }: RecipeCatalog & {
   recipes?: RecipeEntry[];
   feed?: unknown;
@@ -1218,7 +1117,6 @@ function RecipeTabs({ recipes, feed, emptyLabel, item, catalog, modes, itemHref,
   const hideTooltip = useCallback((anchor?: HTMLElement) => {
     setHovered(current => !anchor || current?.anchor === anchor ? undefined : current);
   }, []);
-  const tooltipData = useItemTooltip(hovered?.item);
   const groups = useMemo(() => {
     const byStation = new Map<string, RecipeEntry[]>();
     for (const recipe of recipes ?? readRecipeFeed(feed)) {
@@ -1295,7 +1193,7 @@ function RecipeTabs({ recipes, feed, emptyLabel, item, catalog, modes, itemHref,
     const previous = previousTab.current;
     previousTab.current = selected;
     if (previous === selected) return;
-    const arrival = animateItemArrival(activePanel.current, selected > previous ? 1 : -1);
+    const arrival = animatePanelArrival(activePanel.current, selected > previous ? 1 : -1);
     return () => arrival?.cancel();
   }, [selected]);
   useLayoutEffect(() => {
@@ -1315,8 +1213,7 @@ function RecipeTabs({ recipes, feed, emptyLabel, item, catalog, modes, itemHref,
   };
   const stationItem = activeStation === undefined ? undefined : findStation(activeStation);
   const showStationSlot = !!stationItem || (isItemId(activeStation) && stations.status === 'loading');
-  const tooltip = hovered && <ItemTooltip key={hovered.item.id} id={tooltipId} modes={modes} data={tooltipData}
-    onDismiss={links.hideTooltip} {...hovered} />;
+  const tooltip = hovered && <ItemTooltip id={tooltipId} target={hovered} item={hovered.item} onDismiss={links.hideTooltip} />;
 
   function resetRecipeScroll() {
     activePanel.current?.parentElement?.scrollTo(0, 0);
@@ -1436,7 +1333,7 @@ function RecipeGroup({ recipes, page, item, catalog, links, panel, onOpenIngredi
     const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
     const timer = window.setInterval(() => {
       if (motion.matches || panel.current?.querySelector(
-        '.item-recipe-slot:hover, .item-recipe-ingredient:is(:focus-within, :active, [aria-describedby])',
+        '.item-recipe-slot:hover, .item-recipe-ingredient:is(:focus-within, :active, [aria-describedby], [aria-expanded=true])',
       )) return;
       setRotation(current => current + 1);
     }, ingredientRotationMs);
@@ -1604,11 +1501,10 @@ function RecipeInput({ input, options, findItem, rotation, links, onOpenIngredie
   return <>
     <button className="item-slot-button item-recipe-ingredient" type="button" aria-label={label} aria-haspopup="dialog"
       data-count={current?.option.amount !== undefined || undefined}
-      aria-describedby={tooltip.active ? tooltipId : undefined}
-      aria-keyshortcuts={preview ? 'Shift+F10' : undefined}
+      aria-describedby={tooltip.active && !tooltip.pinned ? tooltipId : undefined}
+      aria-expanded={!!tooltip.pinned} aria-controls={tooltip.pinned ? tooltipId : undefined}
       onPointerEnter={tooltip.onPointerEnter}
       onPointerLeave={tooltip.onPointerLeave}
-      onPointerDown={tooltip.onPointerDown}
       onFocus={tooltip.onFocus}
       onBlur={tooltip.onBlur}
       onKeyDown={event => {
@@ -1616,24 +1512,22 @@ function RecipeInput({ input, options, findItem, rotation, links, onOpenIngredie
           event.preventDefault();
           hideIngredientTooltip(event.currentTarget);
         }
-        if (preview && (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10'))) {
-          event.preventDefault();
-          openUses(preview);
-        }
       }}
       onContextMenu={event => {
-        if (!preview || ('pointerType' in event.nativeEvent && event.nativeEvent.pointerType === 'touch')) return;
+        if (!preview || event.button !== 2 || ('pointerType' in event.nativeEvent && event.nativeEvent.pointerType === 'touch')) return;
         event.preventDefault();
         openUses(preview);
       }}
       onClick={event => {
-        if (tooltip.previewTouch(event)) return;
-        hideIngredientTooltip();
-        onOpenIngredient();
+        const open = () => {
+          hideIngredientTooltip();
+          onOpenIngredient();
+        };
+        if (!tooltip.pin(event, { actions: [{ label: text.itemRecipeAlternatives, run: open }] })) open();
       }}>
       {content}
     </button>
-    {target && <ItemTooltipPopover id={tooltipId} anchor={target.anchor} onDismiss={hideIngredientTooltip}>
+    {target && <ItemTooltipPopover id={tooltipId} target={target} onDismiss={hideIngredientTooltip}>
       <strong>{tagLabels || text.itemRecipeAlternatives}</strong>
       <ul className="item-recipe-ingredient-tooltip-list">
         {variants.slice(0, ingredientTooltipLimit).map((option, index) => <li key={index}>
@@ -1702,7 +1596,7 @@ function RecipeIngredientDialog({ input, options, item, catalog, links, onClose,
     const element = dialog.current;
     if (!element) return;
     element.showModal();
-    const arrival = animateItemArrival(element.querySelector<HTMLElement>('.item-detail'));
+    const arrival = animatePanelArrival(element.querySelector<HTMLElement>('.item-detail'));
     return () => {
       arrival?.cancel();
       element.close();
@@ -1774,13 +1668,14 @@ function UnlistedRecipeIcon({ label, description, children }: { label: string; d
   const tooltip = useTooltipTrigger<HTMLButtonElement>(target, setTarget, hideTooltip);
   return <>
     <button className="item-slot-button" type="button" aria-label={plainMinecraftText(label)}
-      aria-describedby={tooltip.active ? tooltipId : undefined}
-      onPointerEnter={tooltip.onPointerEnter} onPointerLeave={tooltip.onPointerLeave} onPointerDown={tooltip.onPointerDown}
-      onFocus={tooltip.onFocus} onBlur={tooltip.onBlur} onClick={event => { tooltip.previewTouch(event); }}
+      aria-describedby={tooltip.active && !tooltip.pinned ? tooltipId : undefined}
+      aria-expanded={!!tooltip.pinned} aria-controls={tooltip.pinned ? tooltipId : undefined}
+      onPointerEnter={tooltip.onPointerEnter} onPointerLeave={tooltip.onPointerLeave}
+      onFocus={tooltip.onFocus} onBlur={tooltip.onBlur} onClick={event => { tooltip.pin(event); }}
       onKeyDown={event => { if (event.key === 'Escape' && tooltip.active) { event.preventDefault(); hideTooltip(); } }}>
       {children}
     </button>
-    {target && <ItemTooltipPopover id={tooltipId} anchor={target.anchor} onDismiss={hideTooltip}>
+    {target && <ItemTooltipPopover id={tooltipId} target={target} onDismiss={hideTooltip}>
       {description}
     </ItemTooltipPopover>}
   </>;

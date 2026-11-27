@@ -8,3 +8,6 @@
 /public/item-catalog/
 /webcraft-exports/
 /data/
+/test-results/
+/.local-artifacts/
+graphify-out/

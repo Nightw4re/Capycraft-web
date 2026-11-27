@@ -211,4 +211,8 @@
     border-inline-end: 0;
     border-block-end: 1px solid var(--panel-border);
   }
+
+  .home-highlight-facts > .home-highlight-slide[aria-hidden="true"] {
+    display: none;
+  }
 }

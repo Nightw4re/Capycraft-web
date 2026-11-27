@@ -1,13 +1,17 @@
 import { useEffect, useId, useRef, type KeyboardEvent } from 'react';
+import type { languageOptions } from '../preferences';
+import type { ServerStatus } from '../serverDirectoryTypes';
+import { ServerStatusIndicator } from '../layout/StatusDot';
 import { useHeaderDisclosure } from './useHeaderDisclosure';
 
 type Option<Value extends string> = {
   value: Value;
   label: string;
   lang?: string;
-  flag?: 'cz' | 'gb';
+  flag?: typeof languageOptions[number]['flag'];
   swatchColor?: string;
   iconSrc?: string;
+  status?: { value: ServerStatus; label: string };
   placeholder?: boolean;
 };
 
@@ -16,19 +20,26 @@ type HeaderPickerProps<Value extends string> = {
   value: Value;
   options: readonly Option<Value>[];
   swatches?: boolean;
+  disabled?: boolean;
   onChange: (value: Value) => void;
 };
 
-export function HeaderPicker<Value extends string>({ label, value, options, swatches = false, onChange }: HeaderPickerProps<Value>) {
+export function HeaderPicker<Value extends string>({ label, value, options, swatches = false, disabled = false,
+  onChange }: HeaderPickerProps<Value>) {
   const id = useId();
   const list = useRef<HTMLDivElement>(null);
   const { open, setOpen, root, trigger, closeAndFocus, onBlur, onKeyDown } = useHeaderDisclosure();
   const selected = options.find(option => option.value === value);
-  const triggerLabel = selected ? `${label}: ${selected.label}` : label;
+  const selectedLabel = selected?.status ? `${selected.label} (${selected.status.label})` : selected?.label;
+  const triggerLabel = selectedLabel ? `${label}: ${selectedLabel}` : label;
 
   useEffect(() => {
     if (open) list.current?.querySelector<HTMLButtonElement>('[aria-selected="true"]')?.focus();
   }, [open]);
+
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled, setOpen]);
 
   function moveFocus(event: KeyboardEvent<HTMLDivElement>) {
     if (event.key === 'Tab' && event.shiftKey) {
@@ -61,6 +72,7 @@ export function HeaderPicker<Value extends string>({ label, value, options, swat
         data-compact={swatches || Boolean(selected?.flag)}
         type="button"
         ref={trigger}
+        disabled={disabled}
         aria-label={triggerLabel}
         aria-expanded={open}
         aria-haspopup="listbox"
@@ -80,6 +92,7 @@ export function HeaderPicker<Value extends string>({ label, value, options, swat
           <span className="header-language-flag" data-flag={selected.flag} aria-hidden="true" />
         ) : (
           <>
+            {selected?.status && <ServerStatusIndicator status={selected.status.value} />}
             {selected?.iconSrc && <img className="header-picker-option-icon" src={selected.iconSrc} alt="" width={20} height={20} />}
             <span className="header-picker-label" lang={selected?.lang}>{selected?.label}</span>
           </>
@@ -95,9 +108,9 @@ export function HeaderPicker<Value extends string>({ label, value, options, swat
               role="option"
               data-placeholder={option.placeholder || undefined}
               aria-selected={option.value === value}
-              aria-label={swatches ? option.label : undefined}
+              aria-label={swatches ? option.label : option.status ? `${option.label} (${option.status.label})` : undefined}
               lang={option.lang}
-              title={swatches ? option.label : undefined}
+              title={swatches ? option.label : option.status?.label}
               tabIndex={-1}
               onClick={() => { onChange(option.value); closeAndFocus(); }}
             >
@@ -106,6 +119,7 @@ export function HeaderPicker<Value extends string>({ label, value, options, swat
               ) : (
                 <>
                   {option.flag && <span className="header-language-flag" data-flag={option.flag} aria-hidden="true" />}
+                  {option.status && <ServerStatusIndicator status={option.status.value} />}
                   {option.iconSrc && <img className="header-picker-option-icon" src={option.iconSrc} alt="" width={20} height={20} />}
                   {option.placeholder && <span aria-hidden="true">›</span>}
                   {option.label}

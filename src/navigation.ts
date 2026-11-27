@@ -1,22 +1,31 @@
 import type { MouseEvent } from 'react';
-import { defaultAlias, isServerAlias, isServerPage, serverPages, type ServerPage } from './minecraftServers.mjs';
+import { defaultAlias, isServerAlias, isServerPage, type ServerPage } from './minecraftServers.mjs';
 import { isItemId, parsePublicItemPath, publicItemPath } from './items/itemRoutes.mts';
+import { legacyQuestsLocation, playersPath, profileName, serverPagePattern } from './pageMetadata.mts';
 
 export const homePath = '/';
-const serverPagePattern = new RegExp(`^/server/([a-z0-9-]+)(?:/(${serverPages.join('|')}))?/?$`);
 
 export type ItemRecipeView = 'recipes' | 'uses';
 export type RecipeIngredientRoute = { recipe: string; slot: number };
 export type ItemRoute = { id: string; view: ItemRecipeView; station?: string; recipePage?: number; ingredient?: RecipeIngredientRoute };
-export type Page = 'home' | ServerPage | 'notFound';
+type ServerSection = Exclude<ServerPage, 'quests' | 'ponder'>;
+export type Page = 'home' | ServerSection | 'notFound';
 
 export type Route =
   | { page: 'home'; server?: string; item?: ItemRoute }
-  | { page: ServerPage; server: string; item?: ItemRoute; catalogPage?: number; catalogQuery?: string }
+  | { page: 'players'; server?: never }
+  | { page: ServerSection; server: string; item?: ItemRoute; catalogPage?: number; catalogQuery?: string }
   | { page: 'notFound' };
 
 export function serverPath(alias: string, page: ServerPage | 'home' = 'home') {
   return `/server/${alias}${page === 'home' ? '' : `/${page}`}`;
+}
+
+export type PlayerProfileTab = 'achievements' | 'quests' | 'inventory';
+
+export function playerProfilePath(server: string, player: string, tab: PlayerProfileTab = 'inventory') {
+  const query = new URLSearchParams({ player, tab });
+  return `${serverPath(server, 'players')}?${query}`;
 }
 
 function splitUrl(url: string) {
@@ -31,8 +40,11 @@ function joinUrl(path: string, params: URLSearchParams) {
 }
 
 export function itemUrl(url: string, item?: ItemRoute) {
+  url = normalizeQuestUrl(url);
   const route = routeFromUrl(url);
-  if (route.page === 'notFound' || !route.server) return url;
+  if (route.page === 'notFound') return url;
+  const server = route.server;
+  if (!isServerAlias(server)) return url;
   const { params } = splitUrl(url);
   params.delete('item');
   params.delete('from');
@@ -40,14 +52,14 @@ export function itemUrl(url: string, item?: ItemRoute) {
   params.delete('station');
   params.delete('recipePage');
   params.delete('ingredient');
-  if (!item || !isItemId(item.id)) return joinUrl(serverPath(route.server, route.page), params);
+  if (!item || !isItemId(item.id)) return joinUrl(serverPath(server, route.page), params);
 
   if (route.page !== 'items') params.set('from', route.page);
   if (item.view === 'uses') params.set('view', 'uses');
   if (item.station !== undefined) params.set('station', item.station);
   if (item.recipePage !== undefined) params.set('recipePage', String(item.recipePage + 1));
   if (item.ingredient) params.set('ingredient', `${item.ingredient.recipe}@${item.ingredient.slot}`);
-  return joinUrl(publicItemPath(route.server, item.id), params);
+  return joinUrl(publicItemPath(server, item.id), params);
 }
 
 export function catalogPageUrl(url: string, page: number, query?: string) {
@@ -88,8 +100,20 @@ function legacyPageUrl(fragment: string) {
 }
 
 export function pageUrl({ pathname, search, hash }: Pick<Location, 'pathname' | 'search' | 'hash'>) {
-  return hash.startsWith('#/') ? legacyPageUrl(hash.slice(1)) : pathname + search;
+  return normalizeQuestUrl(hash.startsWith('#/') ? legacyPageUrl(hash.slice(1)) : pathname + search);
 }
+
+function normalizeQuestUrl(url: string) {
+  const { path, params } = splitUrl(url);
+  const match = serverPagePattern.exec(path);
+  if (match?.[2] === 'quests') return legacyQuestsLocation(match[1], params);
+  if (params.get('from') !== 'quests' || !parsePublicItemPath(path)) return url;
+  params.set('from', 'players');
+  if (profileName('players', params)) params.set('tab', 'quests');
+  return joinUrl(path, params);
+}
+
+export const recoverHomeEvent = 'capycraft:recover-home';
 
 export function navigatePage(url: string) {
   const { pathname, search, hash } = window.location;
@@ -111,14 +135,15 @@ function readPageNumber(value: string | null) {
 }
 
 export function routeFromUrl(url: string, isKnownServer?: (alias: string) => boolean): Route {
-  const { path, params } = splitUrl(url);
+  const { path, params } = splitUrl(normalizeQuestUrl(url));
   if (path === homePath) return { page: 'home' };
+  if (path === playersPath || path === `${playersPath}/`) return { page: 'players' };
   const publicItem = parsePublicItemPath(path);
   const match = publicItem ? null : serverPagePattern.exec(path);
   const server = publicItem?.server ?? match?.[1];
   if (!isServerAlias(server) || (isKnownServer && !isKnownServer(server))) return { page: 'notFound' };
   const section = publicItem ? params.get('from') ?? 'items' : match?.[2];
-  const page = isServerPage(section) || section === 'home' ? section : publicItem ? 'items' : 'home';
+  const page = section === 'home' || (isServerPage(section) && section !== 'quests' && section !== 'ponder') ? section : publicItem ? 'items' : 'home';
   const catalogPage = page === 'items' ? readPageNumber(params.get('page')) : undefined;
   const catalogQuery = page === 'items' ? params.get('q')?.slice(0, 256) : undefined;
   const route = { page, server, catalogPage, catalogQuery } as const;

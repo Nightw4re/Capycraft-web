@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { serverDirectoryPath } from '../src/liveUpdates.mts';
+import { readServerPerformance } from '../src/directoryUpdates.mts';
 import type { ServerInformation, ServerStatus, ServerSummary } from '../src/serverDirectoryTypes.ts';
 import { webcraftToken, type Instance } from './instances.mts';
 import { subscribeWebcraftDirectory, type DirectoryFeed } from './webcraftDirectorySocket.mts';
@@ -76,6 +77,8 @@ function readInformation(value: unknown): ServerInformation | undefined {
     totalUptimeSeconds: wholeNumber(data.totalUptimeSeconds),
     worldAgeDays: wholeNumber(data.worldAgeDays),
     worldAgeMinutes: wholeNumber(data.worldAgeMinutes),
+    worldGameTimeTicks: wholeNumber(data.worldGameTimeTicks),
+    performance: readServerPerformance(data.performance),
     modpack: modpackName || modpackVersion ? { name: modpackName, version: modpackVersion } : undefined,
   };
   if (Object.values(information).some(value => value !== undefined)) return information;
@@ -139,12 +142,14 @@ export function createServerDirectory(
       const lastSeenAt = Date.now();
       const latestInformation = information && !fresh ? {
         ...information,
+        playersOnline: current.information?.playersOnline,
         maxPlayers: information.maxPlayers ?? current.information?.maxPlayers,
         totalUptimeSeconds: information.totalUptimeSeconds ?? current.information?.totalUptimeSeconds,
         worldAgeDays: information.worldAgeDays ?? current.information?.worldAgeDays,
         worldAgeMinutes: information.worldAgeMinutes ?? current.information?.worldAgeMinutes,
+        worldGameTimeTicks: information.worldGameTimeTicks ?? current.information?.worldGameTimeTicks,
       } : information ?? current.information;
-      save.run(alias, latestInformation ? JSON.stringify(latestInformation) : null, lastSeenAt);
+      save.run(alias, latestInformation ? JSON.stringify({ ...latestInformation, performance: undefined }) : null, lastSeenAt);
       current.lastSeenAt = lastSeenAt;
       current.information = latestInformation;
     }
@@ -204,14 +209,14 @@ export function createServerDirectory(
   async function snapshot() {
     // The legacy alias also reserves an import destination on a fresh installation.
     const visibleInstances = Array.from(instances.values()).filter(instance => instance.webcraft || hasLegacyServer());
-    const servers = await Promise.all(visibleInstances.map(async ({ alias, tabs, webcraft }): Promise<ServerSummary> => {
+    const servers = await Promise.all(visibleInstances.map(async ({ alias, tabs: configuredTabs, webcraft }): Promise<ServerSummary> => {
+      const tabs = configuredTabs.filter(tab => tab !== 'ponder');
       const snapshot = snapshots.get(alias)!;
       if (webcraft && !snapshot.information) {
         const catalog = catalogs.get(alias);
         const onlinePlayers = webcraft.onlinePlayersTransport && tabs.includes('players');
         const achievements = webcraft.achievements && tabs.includes('achievements');
         const quests = webcraft.quests && tabs.includes('quests');
-        const ponder = webcraft.ponder && tabs.includes('ponder');
         let items = false;
         if (catalog && tabs.includes('items')) {
           const manifest = await readFile(join(catalog, 'catalog.json'), 'utf8').then(text => fields(JSON.parse(text))).catch(() => undefined);
@@ -219,18 +224,18 @@ export function createServerDirectory(
             && typeof manifest.total === 'number' && manifest.total > 0;
           items = manifest?.state === 'ready' || !!hasPublishedItems;
         }
-        const availableTabs = { items, players: onlinePlayers, achievements, quests, ponder };
+        const availableTabs = { items, players: onlinePlayers, achievements, quests };
         return {
           alias, status: snapshot.status, lastSeenAt: snapshot.lastSeenAt,
           tabs: tabs.filter(tab => availableTabs[tab]),
           access: items ? 'catalog' : onlinePlayers ? 'players' : achievements ? 'achievements'
-            : quests ? 'quests' : ponder ? 'ponder' : 'pending',
+            : quests ? 'quests' : 'pending',
         };
       }
-      const { playersOnline, uptimeSeconds, ...information } = snapshot.information ?? {};
+      const { playersOnline, uptimeSeconds, performance, ...information } = snapshot.information ?? {};
       return {
         alias, tabs, status: snapshot.status, lastSeenAt: snapshot.lastSeenAt, ...information,
-        ...(snapshot.fresh ? { playersOnline, uptimeSeconds } : {}),
+        ...(snapshot.fresh ? { playersOnline, uptimeSeconds, performance } : { lastKnownPlayersOnline: playersOnline }),
       };
     }));
     return servers;

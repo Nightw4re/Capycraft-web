@@ -29,6 +29,13 @@
 
 .player-portrait-name small { color: var(--body-text-color); }
 
+.player-portrait-name a {
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.player-portrait-name a:is(:hover, :focus-visible) { color: var(--text-color); }
+
 .player-portrait canvas:not([hidden]),
 .player-portrait img {
   display: block;

@@ -1,21 +1,30 @@
 import { useEffect, useEffectEvent, useState, type RefObject } from 'react';
 import { flushSync } from 'react-dom';
 import { pageUrl, routeFromUrl, type Page } from './navigation';
+import { profileName } from './pageMetadata.mts';
 import { animatePageArrival, animatePageDeparture } from './scene/pageMotion';
 
-const pageOrder: readonly Page[] = ['home', 'items', 'players', 'achievements', 'quests', 'ponder', 'notFound'];
+const pageOrder: readonly Page[] = ['home', 'items', 'players', 'achievements', 'notFound'];
 
 function readLocationUrl() {
   const location = window.location;
   const url = pageUrl(location);
-  if (location.hash.startsWith('#/')) window.history.replaceState(window.history.state, '', url);
+  if (location.hash.startsWith('#/') || url !== location.pathname + location.search) {
+    window.history.replaceState(window.history.state, '', url);
+  }
   return url;
+}
+
+function pageLocation(url: string, isKnownServer: (alias: string) => boolean) {
+  const { page } = routeFromUrl(url, isKnownServer);
+  const params = new URL(url, window.location.origin).searchParams;
+  return { page, player: profileName(page, params)?.toLowerCase() };
 }
 
 export function usePageLocation(panelsRef: RefObject<HTMLDivElement | null>, isKnownServer: (alias: string) => boolean) {
   const [url, setUrl] = useState(() => pageUrl(window.location));
-  const getCurrentPage = useEffectEvent(() => routeFromUrl(url, isKnownServer).page);
-  const getPage = useEffectEvent((value: string) => routeFromUrl(value, isKnownServer).page);
+  const getCurrentPage = useEffectEvent(() => pageLocation(url, isKnownServer));
+  const getPage = useEffectEvent((value: string) => pageLocation(value, isKnownServer));
 
   useEffect(() => {
     const motion = window.matchMedia('(prefers-reduced-motion: no-preference)');
@@ -28,7 +37,7 @@ export function usePageLocation(panelsRef: RefObject<HTMLDivElement | null>, isK
       const nextPage = getPage(next);
       const panels = panelsRef.current;
 
-      if (nextPage === currentPage || !motion.matches || !panels?.animate ||
+      if ((nextPage.page === currentPage.page && nextPage.player === currentPage.player) || !motion.matches || !panels?.animate ||
           !panels.closest('.scene-entrance[data-intro="complete"]') || panels.querySelector(':modal')) {
         departure?.cancel();
         departure = undefined;
@@ -38,7 +47,9 @@ export function usePageLocation(panelsRef: RefObject<HTMLDivElement | null>, isK
 
       if (departure) return;
 
-      const direction = pageOrder.indexOf(nextPage) > pageOrder.indexOf(currentPage) ? 1 : -1;
+      const forward = nextPage.page === currentPage.page ? nextPage.player !== undefined
+        : pageOrder.indexOf(nextPage.page) > pageOrder.indexOf(currentPage.page);
+      const direction = forward ? 1 : -1;
       const animation = animatePageDeparture(panels, direction);
       arrival?.cancel();
       departure = animation;
